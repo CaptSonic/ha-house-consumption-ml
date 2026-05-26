@@ -2,6 +2,13 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2023.1%2B-blue)](https://www.home-assistant.io)
+[![Development Status](https://img.shields.io/badge/status-early%20alpha-red.svg)]()
+
+> **⚠️ Early Development — Use at your own risk**
+>
+> This integration is in a **very early stage of development**. Expect bugs, breaking changes between versions, and incomplete features. It has only been tested on a single Home Assistant setup.
+>
+> **No liability is accepted** for any damage, data loss, incorrect forecasts, or other issues arising from the use of this software. See the [MIT License](LICENSE) for the full disclaimer.
 
 A Home Assistant custom integration that predicts your household electricity consumption for the next 7 days, hour by hour — using Ridge regression, no cloud, no external dependencies.
 
