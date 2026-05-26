@@ -1,0 +1,5 @@
+{
+  "name": "House Consumption ML Forecast",
+  "render_readme": true,
+  "homeassistant": "2023.1.0"
+}

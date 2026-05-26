@@ -1,0 +1,10 @@
+{
+  "domain": "house_consumption_ml",
+  "name": "House Consumption ML Forecast",
+  "version": "1.0.0",
+  "documentation": "",
+  "requirements": [],
+  "dependencies": ["recorder"],
+  "codeowners": [],
+  "iot_class": "local_polling"
+}
