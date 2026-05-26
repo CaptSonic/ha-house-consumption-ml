@@ -2,7 +2,7 @@
   "domain": "house_consumption_ml",
   "name": "House Consumption ML Forecast",
   "version": "1.0.0",
-  "documentation": "",
+  "documentation": "https://github.com/CaptSonic/ha-house-consumption-ml",
   "requirements": [],
   "dependencies": ["recorder"],
   "codeowners": [],
