@@ -65,6 +65,20 @@ _DDL = [
         explanation_json        TEXT                   -- JSON list, NULL until computed
     )
     """,
+
+    # ------------------------------------------------------------------ #
+    # Nightly forecast freeze (Plan 3)                                     #
+    # Built once per night (00:00–05:59) — sensors read from this table   #
+    # One row per night; INSERT OR REPLACE overwrites previous same-night  #
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS nightly_forecast (
+        created_date TEXT    PRIMARY KEY,  -- YYYY-MM-DD local (which night)
+        created_at   TEXT    NOT NULL,      -- ISO-8601 UTC
+        days_json    TEXT    NOT NULL,      -- JSON list of 7 day dicts (same as coordinator days[])
+        total_kwh    REAL    NOT NULL
+    )
+    """,
 ]
 
 # Migrations: add columns that didn't exist in v1.0
@@ -425,4 +439,43 @@ class HCMLDatabase:
         d["hourly_device_wh"]   = json.loads(d.pop("hourly_device_wh_json")   or "[]")
         d["device_predictions"] = json.loads(d.pop("device_predictions_json") or "{}")
         d["explanation"]        = json.loads(d.pop("explanation_json")         or "[]")
+        return d
+
+    # ------------------------------------------------------------------
+    # Nightly forecast  (Plan 3 — stable sensor display)
+    # ------------------------------------------------------------------
+
+    def save_nightly_forecast(
+        self,
+        created_date: str,
+        created_at: str,
+        days: list,
+        total_kwh: float,
+    ) -> None:
+        """
+        Persist the nightly 7-day forecast.  INSERT OR REPLACE — one row per
+        night; re-running in the same night window overwrites the previous value.
+        """
+        with sqlite3.connect(self._path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO nightly_forecast
+                    (created_date, created_at, days_json, total_kwh)
+                VALUES (?, ?, ?, ?)
+                """,
+                (created_date, created_at, json.dumps(days), total_kwh),
+            )
+            conn.commit()
+
+    def get_latest_nightly_forecast(self) -> dict | None:
+        """Return the most recently stored nightly forecast, or None."""
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM nightly_forecast ORDER BY created_date DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["days"] = json.loads(d.pop("days_json") or "[]")
         return d

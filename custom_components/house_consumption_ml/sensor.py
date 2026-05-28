@@ -134,6 +134,7 @@ class HCMLWeeklyForecastSensor(_Base):
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "days":       self._data.get("days", []),
+            "nightly_at": self._data.get("nightly_at"),
             "updated_at": self._data.get("updated_at"),
         }
 
@@ -159,6 +160,7 @@ class HCMLModelStatusSensor(_Base):
         m = self._data.get("model", {})
         return {
             **m,
+            "nightly_at": self._data.get("nightly_at"),
             "updated_at": self._data.get("updated_at"),
         }
 

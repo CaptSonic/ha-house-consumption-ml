@@ -154,15 +154,63 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         assert self._db is not None
+
+        # Always: collect data point + train model
         await self._collect_datapoint()
         await self._maybe_save_snapshot()
         await self.hass.async_add_executor_job(self._train_model)
-        result = await self._build_forecast()
-        await self._maybe_freeze_and_evaluate(result["days"])
-        result["accuracy"] = await self.hass.async_add_executor_job(
-            self._db.get_latest_forecast_accuracy
+
+        # Between 00:00–05:59: build and persist the nightly forecast once
+        if dt_util.now().hour < 6:
+            await self._maybe_refresh_nightly_forecast()
+
+        # Load the stored nightly forecast (live fallback on very first start)
+        nightly = await self.hass.async_add_executor_job(
+            self._db.get_latest_nightly_forecast
         )
-        return result
+        if nightly is not None:
+            days       = nightly["days"]
+            total_kwh  = nightly["total_kwh"]
+            nightly_at = nightly["created_at"]
+        else:
+            # No nightly forecast stored yet — build live as one-time fallback
+            live       = await self._build_forecast()
+            days       = live["days"]
+            total_kwh  = live["total_kwh"]
+            nightly_at = None
+
+        # Accuracy tracking (uses days[0] for forecast_snapshots)
+        await self._maybe_freeze_and_evaluate(days)
+
+        d = self._discovery
+        return {
+            "days":       days,
+            "total_kwh":  total_kwh,
+            "nightly_at": nightly_at,
+            "model": {
+                "fitted":    self._model.is_fitted,
+                "samples":   self._model.n_samples,
+                "r2_pct":    round(self._model.r2 * 100.0, 1),
+                "rmse_wh":   round(self._model.rmse, 1),
+                "mae_wh":    round(self._model.mae, 1),
+                "db_rows":   self._db.count(),
+            },
+            "discovery": {
+                "house_power_sensor": d.house_power_sensor if d else None,
+                "n_appliances":       len(d.appliance_sensors) if d else 0,
+                "appliance_sensors":  d.appliance_sensors if d else [],
+                "persons":            d.person_entities if d else [],
+                "weather_entity":     d.weather_entity if d else None,
+                "workday_sensor":     d.workday_sensor if d else None,
+            },
+            "snapshot": await self.hass.async_add_executor_job(
+                self._db.get_latest_daily_snapshot
+            ),
+            "accuracy": await self.hass.async_add_executor_job(
+                self._db.get_latest_forecast_accuracy
+            ),
+            "updated_at": dt_util.now().isoformat(),
+        }
 
     # ------------------------------------------------------------------
     # Power reading
@@ -632,7 +680,37 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return accuracy, delta_kwh, explanation
 
     # ------------------------------------------------------------------
-    # Forecast
+    # Nightly forecast refresh  (Plan 3)
+    # ------------------------------------------------------------------
+
+    async def _maybe_refresh_nightly_forecast(self) -> None:
+        """
+        Build and persist the 7-day forecast once per night (00:00–05:59).
+        Skipped if a forecast for the current calendar date already exists.
+        """
+        assert self._db is not None
+        today  = dt_util.now().strftime("%Y-%m-%d")
+        latest = await self.hass.async_add_executor_job(
+            self._db.get_latest_nightly_forecast
+        )
+        if latest and latest["created_date"] == today:
+            return  # Already built for this night
+
+        forecast = await self._build_forecast()
+        await self.hass.async_add_executor_job(
+            self._db.save_nightly_forecast,
+            today,
+            dt_util.utcnow().isoformat(),
+            forecast["days"],
+            forecast["total_kwh"],
+        )
+        _LOGGER.info(
+            "Nightly forecast saved for %s: %.1f kWh (7 days)",
+            today, forecast["total_kwh"],
+        )
+
+    # ------------------------------------------------------------------
+    # Forecast builder  (pure calculation — no DB reads/writes here)
     # ------------------------------------------------------------------
 
     async def _build_forecast(self) -> dict[str, Any]:
@@ -710,42 +788,19 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 daily_wh += total_wh
 
             days.append({
-                "date":             day_start.strftime("%Y-%m-%d"),
-                "day_name":         day_start.strftime("%A"),
-                "predicted_kwh":    round(daily_wh / 1000.0, 2),
-                "base_kwh":         round(sum(hourly_base_kwh), 2),
-                "device_kwh":       round(sum(hourly_device_kwh), 2),
-                "hourly_kwh":       hourly_kwh,
-                "hourly_base_kwh":  hourly_base_kwh,
+                "date":              day_start.strftime("%Y-%m-%d"),
+                "day_name":          day_start.strftime("%A"),
+                "predicted_kwh":     round(daily_wh / 1000.0, 2),
+                "base_kwh":          round(sum(hourly_base_kwh), 2),
+                "device_kwh":        round(sum(hourly_device_kwh), 2),
+                "hourly_kwh":        hourly_kwh,
+                "hourly_base_kwh":   hourly_base_kwh,
                 "hourly_device_kwh": hourly_device_kwh,
             })
 
-        snapshot = await self.hass.async_add_executor_job(
-            self._db.get_latest_daily_snapshot
-        )
-
-        d = self._discovery
         return {
             "days":      days,
             "total_kwh": round(sum(x["predicted_kwh"] for x in days), 2),
-            "model": {
-                "fitted":    self._model.is_fitted,
-                "samples":   self._model.n_samples,
-                "r2_pct":    round(self._model.r2 * 100.0, 1),
-                "rmse_wh":   round(self._model.rmse, 1),
-                "mae_wh":    round(self._model.mae, 1),
-                "db_rows":   self._db.count() if self._db else 0,
-            },
-            "discovery": {
-                "house_power_sensor": d.house_power_sensor if d else None,
-                "n_appliances":       len(d.appliance_sensors) if d else 0,
-                "appliance_sensors":  d.appliance_sensors if d else [],
-                "persons":            d.person_entities if d else [],
-                "weather_entity":     d.weather_entity if d else None,
-                "workday_sensor":     d.workday_sensor if d else None,
-            },
-            "snapshot":   snapshot,
-            "updated_at": dt_util.now().isoformat(),
         }
 
     # ------------------------------------------------------------------
