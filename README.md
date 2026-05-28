@@ -27,6 +27,8 @@ Das Modell trennt den Verbrauch in zwei Komponenten:
 
 Jeden Morgen zwischen 0:00 und 6:00 Uhr wird die Prognose für den laufenden Tag **eingefroren**. Am nächsten Morgen vergleicht die Integration automatisch Prognose vs. Ist-Verbrauch und liefert eine **Genauigkeitsangabe in %** sowie eine **Erklärung** welche Geräte die Abweichung verursacht haben — z. B. „Waschmaschine +1.2 kWh (unerwartet aktiv)".
 
+Über die optionale **Kalender-Integration** lassen sich Urlaubs- und Feiertagskalender einbinden. An Tagen mit einem Kalender-Eintrag verwendet das Modell automatisch das Wochenend-/Feiertagsprofil statt des Werktag-Profils.
+
 ### Sensoren (Übersicht)
 
 | Sensor | Einheit | Beschreibung |
@@ -39,7 +41,7 @@ Jeden Morgen zwischen 0:00 und 6:00 Uhr wird die Prognose für den laufenden Tag
 | `sensor.hcml_modell_status` | % | Modell-R² (Diagnose) |
 | `sensor.hcml_ist_verbrauch_gestern` | kWh | Tatsächlicher Verbrauch gestern |
 | `sensor.hcml_prognose_genauigkeit` | % | Genauigkeit der gestrigen Prognose + Erklärung |
-| `sensor.hcml_discovery` | — | Erkannte Entitäten (Diagnose) |
+| `sensor.hcml_discovery` | — | Erkannte Entitäten inkl. verfügbarer Kalender (Diagnose) |
 
 ---
 
@@ -58,6 +60,8 @@ The model separates consumption into two components:
 
 Every morning between 00:00 and 06:00 the current forecast for the day is **frozen** once. The following morning the integration automatically compares the frozen forecast against the actual consumption and stores an **accuracy percentage** together with a **device-level explanation** of the delta (e.g. "Washing machine +1.2 kWh (unexpectedly active)").
 
+**Calendar integration** (optional): configure holiday and vacation calendars and the model will automatically switch to a weekend/holiday load profile on those days instead of the regular weekday profile.
+
 ### Features used for base load model
 
 | Feature | Description |
@@ -65,10 +69,14 @@ Every morning between 00:00 and 06:00 the current forecast for the day is **froz
 | `h_sin / h_cos` | Hour of day (cyclic) |
 | `d_sin / d_cos` | Day of week (cyclic) |
 | `m_sin / m_cos` | Month (cyclic) |
-| `is_workday` | Binary workday sensor |
+| `is_workday` | Workday flag (sensor or weekday fallback; overridden by calendar) |
 | `any_home / n_home_n` | Presence (any person home, fraction) |
 | `temperature_n` | Normalised outdoor temperature |
 | `cloud_n` | Cloud cover 0–1 |
+| `heat_deg` | Heating demand proxy: `max(0, 18 − T) / 10` |
+| `cool_deg` | Cooling demand proxy: `max(0, T − 23) / 10` |
+
+Training uses **exponential decay sample weights** (30-day half-life) so recent data has more influence than old bootstrap data.
 
 ## Requirements
 
@@ -104,6 +112,13 @@ house_consumption_ml:
     - ab2000          # BKW battery
     - my_inverter
 
+  # Calendars for holidays and vacation days (optional)
+  # Days with any event in these calendars are treated as non-workdays.
+  # Tip: check sensor.hcml_discovery → calendars_available to see all available calendar IDs.
+  calendars:
+    - calendar.urlaub
+    - calendar.feiertage_deutschland
+
   # Paths to SQLite databases (defaults shown)
   db_path: /config/house_consumption_ml.db
   sfml_db_path: /config/solar_forecast.db   # read-only if present
@@ -117,6 +132,14 @@ The sensor must return **actual house consumption in Watts (W), always ≥ 0**. 
 
 Any sensor whose `entity_id` or friendly name contains one of these strings (case-insensitive) is excluded from the appliance list. Use this for solar inverters, batteries, or any device that is not a consumer load.
 
+### `calendars`
+
+A list of `calendar.*` entity IDs. Any day that has at least one event in any of the listed calendars is treated as a non-workday — the model uses the weekend/holiday consumption profile instead of the weekday profile. This applies both to training data collection and to the 7-day forecast.
+
+**Important:** only add calendars that contain holidays or vacation. A garbage-collection calendar with entries on regular workdays would incorrectly suppress the workday profile on those days — just leave it out.
+
+To find the right entity IDs, check the `calendars_available` attribute of `sensor.hcml_discovery` after a restart. It lists every calendar HA currently knows about.
+
 ## Auto-discovery
 
 On first start the integration scans all HA entities and classifies them automatically:
@@ -128,8 +151,9 @@ On first start the integration scans all HA entities and classifies them automat
 | **Persons** | All `person.*` entities |
 | **Weather** | Priority: fusion → forecast → openweathermap → bright_sky |
 | **Workday** | `binary_sensor.*workday*` / `*werktag*` |
+| **Calendars** | All `calendar.*` entities — listed in discovery for reference |
 
-Check `sensor.hcml_discovery` attributes to see what was found.
+Check `sensor.hcml_discovery` attributes to see what was found. The `calendars_available` attribute shows every calendar HA knows about; copy the IDs you want into the `calendars:` config option.
 
 ## Sensors created
 
@@ -143,7 +167,7 @@ Check `sensor.hcml_discovery` attributes to see what was found.
 | `sensor.hcml_modell_status` | % | Model R² (diagnostic) |
 | `sensor.hcml_ist_verbrauch_gestern` | kWh | Yesterday's actual consumption (diagnostic) |
 | `sensor.hcml_prognose_genauigkeit` | % | Yesterday's forecast accuracy + explanation (diagnostic) |
-| `sensor.hcml_discovery` | — | Discovered entities (diagnostic) |
+| `sensor.hcml_discovery` | — | Discovered entities incl. available calendars (diagnostic) |
 
 ### Day sensor attributes
 
