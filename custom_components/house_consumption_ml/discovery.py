@@ -69,6 +69,7 @@ class DiscoveryResult:
     person_entities: list[str]              # person.* entities
     weather_entity: str | None              # best weather entity
     workday_sensor: str | None              # binary workday sensor
+    calendar_entities: list[str] = field(default_factory=list)  # all available calendars
 
     def log_summary(self) -> None:
         _LOGGER.info(
@@ -77,12 +78,14 @@ class DiscoveryResult:
             "  appliances  : %d sensors\n"
             "  persons     : %s\n"
             "  weather     : %s\n"
-            "  workday     : %s",
+            "  workday     : %s\n"
+            "  calendars   : %s",
             self.house_power_sensor or "NOT FOUND (will sum appliances)",
             len(self.appliance_sensors),
             self.person_entities or "none",
             self.weather_entity or "none",
             self.workday_sensor or "none (weekday fallback)",
+            self.calendar_entities or "none found",
         )
         if self.appliance_sensors:
             _LOGGER.debug("  appliance list: %s", self.appliance_sensors)
@@ -102,6 +105,7 @@ def discover_all(
     persons     = _find_persons(hass)
     weather     = _find_weather(hass)
     workday     = _find_workday(hass)
+    calendars   = _find_calendars(hass)
 
     result = DiscoveryResult(
         house_power_sensor=house_power,
@@ -109,6 +113,7 @@ def discover_all(
         person_entities=persons,
         weather_entity=weather,
         workday_sensor=workday,
+        calendar_entities=calendars,
     )
     result.log_summary()
     return result
@@ -305,3 +310,11 @@ def _find_workday(hass: HomeAssistant) -> str | None:
         if _WORKDAY_PAT.search(state.entity_id):
             return state.entity_id
     return None
+
+
+def _find_calendars(hass: HomeAssistant) -> list[str]:
+    """Return all calendar entity IDs sorted alphabetically.
+    Shown in the discovery diagnostic sensor so the user knows which IDs
+    to put into the 'calendars:' config option.
+    """
+    return sorted(s.entity_id for s in hass.states.async_all("calendar"))

@@ -7,6 +7,7 @@ CONF_DB_PATH            = "db_path"
 CONF_SFML_DB_PATH       = "sfml_db_path"
 CONF_HOUSE_POWER_SENSOR = "house_power_sensor"   # override auto-discovery
 CONF_EXCLUDE_DEVICES    = "exclude_devices"       # list of name fragments to skip
+CONF_CALENDARS          = "calendars"             # list of calendar entity IDs (holidays/vacation)
 
 DEFAULT_DB_PATH      = "/config/house_consumption_ml.db"
 DEFAULT_SFML_DB_PATH = "/config/solar_forecast.db"

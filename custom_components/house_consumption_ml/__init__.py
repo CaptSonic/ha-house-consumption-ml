@@ -10,7 +10,8 @@ from homeassistant.helpers.discovery import async_load_platform
 
 from .const import (
     CONF_DB_PATH, CONF_SFML_DB_PATH, CONF_HOUSE_POWER_SENSOR,
-    CONF_EXCLUDE_DEVICES, DEFAULT_DB_PATH, DEFAULT_SFML_DB_PATH, DOMAIN,
+    CONF_EXCLUDE_DEVICES, CONF_CALENDARS,
+    DEFAULT_DB_PATH, DEFAULT_SFML_DB_PATH, DOMAIN,
 )
 from .coordinator import HCMLCoordinator
 
@@ -25,6 +26,8 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional(CONF_HOUSE_POWER_SENSOR, default=""):                   cv.string,
                 vol.Optional(CONF_EXCLUDE_DEVICES,    default=[]):
                     vol.All(cv.ensure_list, [cv.string]),
+                vol.Optional(CONF_CALENDARS,          default=[]):
+                    vol.All(cv.ensure_list, [cv.string]),
             }
         )
     },
@@ -38,6 +41,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     sfml_db_path       = conf.get(CONF_SFML_DB_PATH,       DEFAULT_SFML_DB_PATH)
     house_power_sensor = conf.get(CONF_HOUSE_POWER_SENSOR, "")
     exclude_devices    = conf.get(CONF_EXCLUDE_DEVICES,    [])
+    calendars          = conf.get(CONF_CALENDARS,          [])
 
     coordinator = HCMLCoordinator(
         hass,
@@ -45,6 +49,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         sfml_db_path=sfml_db_path,
         house_power_sensor=house_power_sensor,
         exclude_devices=exclude_devices,
+        calendars=calendars,
     )
     hass.data[DOMAIN] = coordinator
 

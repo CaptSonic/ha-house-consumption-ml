@@ -49,6 +49,7 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         sfml_db_path: str = "",
         house_power_sensor: str = "",
         exclude_devices: list[str] | None = None,
+        calendars: list[str] | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -60,6 +61,8 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._sfml_db_path = sfml_db_path
         self._configured_house_power = house_power_sensor
         self._exclude_devices = frozenset(s.lower() for s in (exclude_devices or []))
+        self._calendar_ids: list[str] = list(calendars or [])
+        self._holiday_dates: set[str] = set()   # YYYY-MM-DD strings, refreshed each update
         self._db: HCMLDatabase | None = None
         self._discovery: DiscoveryResult | None = None
         self._model = RidgeModel(alpha=RIDGE_ALPHA)
@@ -159,6 +162,9 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         assert self._db is not None
 
+        # Refresh calendar-based holiday dates for the next 8 days
+        self._holiday_dates = await self._get_holiday_dates()
+
         # Always: collect data point + train model
         await self._collect_datapoint()
         await self._maybe_save_snapshot()
@@ -206,12 +212,15 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "avg_accuracy_7d": avg_acc_7d,
             },
             "discovery": {
-                "house_power_sensor": d.house_power_sensor if d else None,
-                "n_appliances":       len(d.appliance_sensors) if d else 0,
-                "appliance_sensors":  d.appliance_sensors if d else [],
-                "persons":            d.person_entities if d else [],
-                "weather_entity":     d.weather_entity if d else None,
-                "workday_sensor":     d.workday_sensor if d else None,
+                "house_power_sensor":  d.house_power_sensor if d else None,
+                "n_appliances":        len(d.appliance_sensors) if d else 0,
+                "appliance_sensors":   d.appliance_sensors if d else [],
+                "persons":             d.person_entities if d else [],
+                "weather_entity":      d.weather_entity if d else None,
+                "workday_sensor":      d.workday_sensor if d else None,
+                "calendars_available": d.calendar_entities if d else [],
+                "calendars_active":    self._calendar_ids,
+                "holiday_dates":       sorted(self._holiday_dates),
             },
             "snapshot": await self.hass.async_add_executor_job(
                 self._db.get_latest_daily_snapshot
@@ -342,6 +351,78 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return lookup
 
     # ------------------------------------------------------------------
+    # Calendar / holiday resolution
+    # ------------------------------------------------------------------
+
+    async def _get_holiday_dates(self) -> set[str]:
+        """
+        Query the configured calendar entities for events in the next 8 days
+        (today + 7 forecast days).  Returns a set of YYYY-MM-DD strings where
+        at least one event exists — those days are treated as non-workdays.
+
+        Both all-day and timed events count.  Select only calendars that contain
+        holidays/vacation; do NOT include e.g. a garbage-collection calendar.
+
+        Silently returns an empty set when:
+          • no calendars are configured
+          • a configured entity does not exist in HA
+          • the calendar.get_events service call fails (HA < 2022.5)
+        """
+        if not self._calendar_ids:
+            return set()
+
+        valid_ids = [
+            eid for eid in self._calendar_ids
+            if self.hass.states.get(eid) is not None
+        ]
+        if not valid_ids:
+            _LOGGER.debug(
+                "HCML: configured calendars not found in HA: %s", self._calendar_ids
+            )
+            return set()
+
+        now   = dt_util.now()
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end   = start + timedelta(days=8)
+        tz    = dt_util.DEFAULT_TIME_ZONE
+
+        try:
+            result = await self.hass.services.async_call(
+                "calendar", "get_events",
+                {
+                    "entity_id":       valid_ids,
+                    "start_date_time": start.isoformat(),
+                    "end_date_time":   end.isoformat(),
+                },
+                blocking=True,
+                return_response=True,
+            )
+        except Exception as exc:
+            _LOGGER.debug("calendar.get_events unavailable: %s", exc)
+            return set()
+
+        dates: set[str] = set()
+        if isinstance(result, dict):
+            for cal_data in result.values():
+                for event in (cal_data.get("events") or []):
+                    raw = str(event.get("start") or "")
+                    if len(raw) == 10:
+                        # All-day event: "YYYY-MM-DD"
+                        dates.add(raw)
+                    elif raw:
+                        # Timed event: parse to local date
+                        try:
+                            ev_dt = dt_util.parse_datetime(raw)
+                            if ev_dt:
+                                dates.add(ev_dt.astimezone(tz).strftime("%Y-%m-%d"))
+                        except Exception:
+                            pass
+
+        if dates:
+            _LOGGER.debug("Holiday/vacation dates from calendars: %s", sorted(dates))
+        return dates
+
+    # ------------------------------------------------------------------
     # Data collection
     # ------------------------------------------------------------------
 
@@ -385,7 +466,8 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         presence  = self._read_presence()
         devices   = self._read_appliance_states()
-        is_wday   = self._read_workday()
+        today_str = now.strftime("%Y-%m-%d")
+        is_wday   = 0 if today_str in self._holiday_dates else self._read_workday()
         temp, cld = await self._read_current_weather()
 
         self._db.insert_or_update(
@@ -805,6 +887,7 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         for day_idx in range(FORECAST_DAYS):
             day_start = (start + timedelta(days=day_idx)).replace(hour=0)
+            is_holiday = day_start.strftime("%Y-%m-%d") in self._holiday_dates
             hourly_kwh: list[float]        = []
             hourly_base_kwh: list[float]   = []
             hourly_device_kwh: list[float] = []
@@ -818,7 +901,7 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if day_idx == 0:
                     presence = presence_now
-                    wday     = wday_now
+                    wday     = 0 if is_holiday else wday_now
                 else:
                     presence = {
                         pid: int(
@@ -826,7 +909,7 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         )
                         for pid in self._person_ids
                     }
-                    wday = int(dow < 5)
+                    wday = 0 if is_holiday else int(dow < 5)
 
                 feats = build_features(
                     hour=fc_dt.hour,
