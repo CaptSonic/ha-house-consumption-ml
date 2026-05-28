@@ -34,6 +34,7 @@ async def async_setup_platform(
         HCMLModelStatusSensor(coordinator),
         HCMLDiscoverySensor(coordinator),
         HCMLSnapshotSensor(coordinator),
+        HCMLForecastAccuracySensor(coordinator),
     ]
     for i in range(FORECAST_DAYS):
         entities.append(HCMLDayForecastSensor(coordinator, i))
@@ -214,6 +215,44 @@ class HCMLSnapshotSensor(_Base):
             "hours_count": s["hours_count"],
             "hourly_wh":   s["hourly_wh"],
             "recorded_at": s["recorded_at"],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Forecast accuracy (diagnostic)
+# ---------------------------------------------------------------------------
+
+class HCMLForecastAccuracySensor(_Base):
+    """
+    Shows how accurately yesterday morning's frozen forecast matched the
+    actual consumption, plus a device-level explanation of the delta.
+    """
+
+    _attr_name                       = "HCML Prognose-Genauigkeit"
+    _attr_unique_id                  = "hcml_prognose_genauigkeit"
+    _attr_native_unit_of_measurement = "%"
+    _attr_state_class                = SensorStateClass.MEASUREMENT
+    _attr_icon                       = "mdi:chart-line-variant"
+    _attr_entity_category            = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> float | None:
+        a = self._data.get("accuracy")
+        return a["accuracy_pct"] if a else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        a = self._data.get("accuracy")
+        if not a:
+            return {}
+        forecast_kwh = round(sum(v or 0 for v in a["hourly_wh"]) / 1000.0, 2)
+        return {
+            "date":         a["date"],
+            "forecast_kwh": forecast_kwh,
+            "actual_kwh":   round(forecast_kwh + (a["delta_kwh"] or 0), 2),
+            "delta_kwh":    a["delta_kwh"],
+            "explanation":  a.get("explanation") or [],
+            "frozen_at":    a["frozen_at"],
         }
 
 

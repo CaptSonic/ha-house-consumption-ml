@@ -157,7 +157,12 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._collect_datapoint()
         await self._maybe_save_snapshot()
         await self.hass.async_add_executor_job(self._train_model)
-        return await self._build_forecast()
+        result = await self._build_forecast()
+        await self._maybe_freeze_and_evaluate(result["days"])
+        result["accuracy"] = await self.hass.async_add_executor_job(
+            self._db.get_latest_forecast_accuracy
+        )
+        return result
 
     # ------------------------------------------------------------------
     # Power reading
@@ -436,6 +441,195 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Snapshot saved for %s: %.2f kWh (%d/24h)",
             yesterday, actual_kwh, len(rows),
         )
+
+    # ------------------------------------------------------------------
+    # Morning forecast freeze + accuracy evaluation  (Plan 2)
+    # ------------------------------------------------------------------
+
+    async def _maybe_freeze_and_evaluate(self, days: list[dict]) -> None:
+        """
+        Two jobs per call:
+
+        1. If the hour is between 00:00–05:59 and no freeze exists for today,
+           persist the current forecast as today's immutable morning snapshot.
+
+        2. If yesterday's freeze exists but accuracy hasn't been computed yet,
+           and yesterday's actual snapshot is available, compute accuracy +
+           device-level explanation and store it.
+        """
+        assert self._db is not None
+        now       = dt_util.now()
+        today     = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # ── 1. Freeze today's forecast (only between 00:00 and 05:59) ────
+        if now.hour < 6:
+            exists = await self.hass.async_add_executor_job(
+                self._db.has_forecast_freeze, today
+            )
+            if not exists and days:
+                today_day = days[0]
+                dow = now.weekday()
+                device_predictions = {
+                    eid: round(sum(
+                        self._device_patterns.get((dow, h, eid), 0.0)
+                        for h in range(24)
+                    ))
+                    for eid in self._appliance_sensors
+                }
+                # hourly_kwh stored as kWh → convert to Wh for storage
+                await self.hass.async_add_executor_job(
+                    self._db.save_forecast_freeze,
+                    today,
+                    dt_util.utcnow().isoformat(),
+                    [round(v * 1000) for v in today_day["hourly_kwh"]],
+                    [round(v * 1000) for v in today_day["hourly_base_kwh"]],
+                    [round(v * 1000) for v in today_day["hourly_device_kwh"]],
+                    device_predictions,
+                )
+                _LOGGER.info(
+                    "Forecast frozen for %s at %02d:xx", today, now.hour
+                )
+
+        # ── 2. Compute accuracy for yesterday (if not yet done) ───────────
+        freeze_row = await self.hass.async_add_executor_job(
+            self._db.get_forecast_freeze, yesterday
+        )
+        if freeze_row is None or freeze_row.get("accuracy_pct") is not None:
+            return  # No freeze, or already computed
+
+        actual_snapshot = await self.hass.async_add_executor_job(
+            self._db.get_daily_snapshot, yesterday
+        )
+        if actual_snapshot is None:
+            return  # Actual data not available yet
+
+        actual_rows = await self.hass.async_add_executor_job(
+            self._db.get_rows_for_local_date, yesterday
+        )
+
+        # Resolve friendly names in async context (hass.states must not be
+        # accessed from an executor thread)
+        friendly_names: dict[str, str] = {}
+        for eid in self._appliance_sensors:
+            st = self.hass.states.get(eid)
+            friendly_names[eid] = (
+                st.attributes.get("friendly_name") if st else None
+            ) or eid.split(".")[-1]
+
+        accuracy_pct, delta_kwh, explanation = self._compute_accuracy_and_explanation(
+            freeze_row, actual_snapshot, actual_rows, friendly_names
+        )
+
+        if accuracy_pct is not None:
+            await self.hass.async_add_executor_job(
+                self._db.update_forecast_accuracy,
+                yesterday, accuracy_pct, delta_kwh, explanation,
+            )
+            _LOGGER.info(
+                "Forecast accuracy for %s: %.1f%% (Δ=%.2f kWh, %d explanations)",
+                yesterday, accuracy_pct, delta_kwh, len(explanation),
+            )
+
+    @staticmethod
+    def _compute_accuracy_and_explanation(
+        freeze_row: dict,
+        actual_snapshot: dict,
+        actual_rows: list[dict],
+        friendly_names: dict[str, str],
+    ) -> tuple[float | None, float, list[dict]]:
+        """
+        Pure computation (no I/O) — safe to run in async context.
+
+        Returns (accuracy_pct, delta_kwh, explanation_list).
+        accuracy_pct is None if not enough data to compute.
+        """
+        forecast_wh = freeze_row["hourly_wh"]
+        actual_wh   = actual_snapshot["hourly_wh"]  # may contain None for missing hours
+
+        # Only compare hours where actual measurement is available
+        pairs = [
+            (f or 0.0, a)
+            for f, a in zip(forecast_wh, actual_wh)
+            if a is not None
+        ]
+        if not pairs:
+            return None, 0.0, []
+
+        forecast_total = sum(f for f, a in pairs)
+        actual_total   = sum(a for f, a in pairs)
+        delta_wh  = actual_total - forecast_total
+        delta_kwh = round(delta_wh / 1000.0, 3)
+        accuracy  = (
+            round(max(0.0, 100.0 * (1.0 - abs(delta_wh) / actual_total)), 1)
+            if actual_total > 0 else None
+        )
+
+        # ── Device-level contribution to the delta ────────────────────────
+        actual_device_wh: dict[str, float] = {}
+        for row in actual_rows:
+            for eid, w in (row.get("devices") or {}).items():
+                try:
+                    actual_device_wh[eid] = (
+                        actual_device_wh.get(eid, 0.0) + float(w)
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+        device_predictions = freeze_row.get("device_predictions") or {}
+        explanation: list[dict] = []
+        total_dev_delta = 0.0
+
+        for eid in set(device_predictions) | set(actual_device_wh):
+            predicted  = float(device_predictions.get(eid, 0.0))
+            actual_d   = actual_device_wh.get(eid, 0.0)
+            dev_delta  = actual_d - predicted
+            total_dev_delta += dev_delta
+            if abs(dev_delta) < 100:   # ignore changes < 100 Wh
+                continue
+            name      = friendly_names.get(eid, eid.split(".")[-1])
+            direction = (
+                "unerwartet aktiv"
+                if dev_delta > 0
+                else "weniger aktiv als erwartet"
+            )
+            explanation.append({
+                "entity":    eid,
+                "name":      name,
+                "delta_wh":  round(dev_delta),
+                "delta_kwh": round(dev_delta / 1000.0, 3),
+                "direction": direction,
+                "label": (
+                    f"{name} {'+' if dev_delta > 0 else ''}"
+                    f"{dev_delta / 1000.0:.2f} kWh ({direction})"
+                ),
+            })
+
+        # Sort by magnitude, keep top 5
+        explanation.sort(key=lambda x: abs(x["delta_wh"]), reverse=True)
+        explanation = explanation[:5]
+
+        # ── Base-load residual ────────────────────────────────────────────
+        base_delta = delta_wh - total_dev_delta
+        if abs(base_delta) > 100:
+            direction = (
+                "höher als erwartet"
+                if base_delta > 0
+                else "niedriger als erwartet"
+            )
+            explanation.append({
+                "entity":    "base_load",
+                "name":      "Grundlast",
+                "delta_wh":  round(base_delta),
+                "delta_kwh": round(base_delta / 1000.0, 3),
+                "direction": direction,
+                "label": (
+                    f"Grundlast {'+' if base_delta > 0 else ''}"
+                    f"{base_delta / 1000.0:.2f} kWh ({direction})"
+                ),
+            })
+
+        return accuracy, delta_kwh, explanation
 
     # ------------------------------------------------------------------
     # Forecast

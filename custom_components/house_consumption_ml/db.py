@@ -36,7 +36,6 @@ _DDL = [
 
     # ------------------------------------------------------------------ #
     # Daily actuals snapshot (written once per day, around midnight)      #
-    # Future: forecast_snapshots table will be added here for Plan 2     #
     # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS daily_snapshots (
@@ -45,6 +44,25 @@ _DDL = [
         hourly_wh_json TEXT    NOT NULL,            -- JSON [wh_0..wh_23], null for missing hours
         hours_count    INTEGER NOT NULL,            -- Available hours out of 24
         recorded_at    TEXT    NOT NULL             -- ISO-8601 UTC when written
+    )
+    """,
+
+    # ------------------------------------------------------------------ #
+    # Morning forecast freeze + accuracy (Plan 2)                         #
+    # Written once per day between 00:00–05:59 local time                #
+    # accuracy_pct / delta_kwh / explanation_json filled in next morning  #
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS forecast_snapshots (
+        date                    TEXT    PRIMARY KEY,  -- YYYY-MM-DD local
+        frozen_at               TEXT    NOT NULL,      -- ISO-8601 UTC
+        hourly_wh_json          TEXT    NOT NULL,      -- [wh_0..wh_23] total predicted (Wh)
+        hourly_base_wh_json     TEXT    NOT NULL,      -- base-load component
+        hourly_device_wh_json   TEXT    NOT NULL,      -- device-pattern component
+        device_predictions_json TEXT    NOT NULL,      -- {entity_id: predicted_wh_for_day}
+        accuracy_pct            REAL,                  -- NULL until actual data available
+        delta_kwh               REAL,                  -- actual_kwh - forecast_kwh
+        explanation_json        TEXT                   -- JSON list, NULL until computed
     )
     """,
 ]
@@ -292,4 +310,119 @@ class HCMLDatabase:
             return None
         d = dict(row)
         d["hourly_wh"] = json.loads(d.pop("hourly_wh_json") or "[]")
+        return d
+
+    def get_daily_snapshot(self, date: str) -> dict | None:
+        """Return the daily snapshot for a specific date (YYYY-MM-DD), or None."""
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM daily_snapshots WHERE date = ?", (date,)
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["hourly_wh"] = json.loads(d.pop("hourly_wh_json") or "[]")
+        return d
+
+    # ------------------------------------------------------------------
+    # Forecast freeze + accuracy  (Plan 2)
+    # ------------------------------------------------------------------
+
+    def has_forecast_freeze(self, date: str) -> bool:
+        """Return True if a forecast freeze for `date` (YYYY-MM-DD) already exists."""
+        with sqlite3.connect(self._path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM forecast_snapshots WHERE date = ?", (date,)
+            ).fetchone()
+        return row is not None
+
+    def save_forecast_freeze(
+        self,
+        date: str,
+        frozen_at: str,
+        hourly_wh: list,
+        hourly_base_wh: list,
+        hourly_device_wh: list,
+        device_predictions: dict,
+    ) -> None:
+        """
+        Persist a morning forecast freeze.  INSERT OR IGNORE — idempotent.
+        hourly_wh / hourly_base_wh / hourly_device_wh are lists of Wh values.
+        device_predictions is {entity_id: predicted_wh_for_day}.
+        """
+        with sqlite3.connect(self._path) as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO forecast_snapshots
+                    (date, frozen_at, hourly_wh_json, hourly_base_wh_json,
+                     hourly_device_wh_json, device_predictions_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    date,
+                    frozen_at,
+                    json.dumps(hourly_wh),
+                    json.dumps(hourly_base_wh),
+                    json.dumps(hourly_device_wh),
+                    json.dumps(device_predictions),
+                ),
+            )
+            conn.commit()
+
+    def get_forecast_freeze(self, date: str) -> dict | None:
+        """Return the forecast freeze for `date` as a dict, or None."""
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM forecast_snapshots WHERE date = ?", (date,)
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["hourly_wh"]          = json.loads(d.pop("hourly_wh_json")          or "[]")
+        d["hourly_base_wh"]     = json.loads(d.pop("hourly_base_wh_json")     or "[]")
+        d["hourly_device_wh"]   = json.loads(d.pop("hourly_device_wh_json")   or "[]")
+        d["device_predictions"] = json.loads(d.pop("device_predictions_json") or "{}")
+        d["explanation"]        = json.loads(d.pop("explanation_json")         or "[]")
+        return d
+
+    def update_forecast_accuracy(
+        self,
+        date: str,
+        accuracy_pct: float,
+        delta_kwh: float,
+        explanation: list,
+    ) -> None:
+        """Fill in accuracy metrics for an existing forecast freeze row."""
+        with sqlite3.connect(self._path) as conn:
+            conn.execute(
+                """
+                UPDATE forecast_snapshots
+                SET accuracy_pct = ?, delta_kwh = ?, explanation_json = ?
+                WHERE date = ?
+                """,
+                (accuracy_pct, delta_kwh, json.dumps(explanation), date),
+            )
+            conn.commit()
+
+    def get_latest_forecast_accuracy(self) -> dict | None:
+        """Return the most recent forecast freeze that has accuracy computed, or None."""
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT * FROM forecast_snapshots
+                WHERE accuracy_pct IS NOT NULL
+                ORDER BY date DESC LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["hourly_wh"]          = json.loads(d.pop("hourly_wh_json")          or "[]")
+        d["hourly_base_wh"]     = json.loads(d.pop("hourly_base_wh_json")     or "[]")
+        d["hourly_device_wh"]   = json.loads(d.pop("hourly_device_wh_json")   or "[]")
+        d["device_predictions"] = json.loads(d.pop("device_predictions_json") or "{}")
+        d["explanation"]        = json.loads(d.pop("explanation_json")         or "[]")
         return d
