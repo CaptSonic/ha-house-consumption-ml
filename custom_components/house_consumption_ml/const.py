@@ -34,3 +34,7 @@ DEVICE_ON_THRESHOLD_W = 10.0
 
 # A device is considered "large" (washer / dryer / oven) above this threshold
 LARGE_DEVICE_THRESHOLD_W = 1_500.0
+
+# Minimum number of recorded hours before a daily snapshot is considered valid
+# (guards against snapshotting days where HA was mostly offline)
+SNAPSHOT_MIN_HOURS = 12

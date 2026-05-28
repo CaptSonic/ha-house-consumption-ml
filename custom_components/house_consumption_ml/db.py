@@ -13,10 +13,13 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DDL = [
+    # ------------------------------------------------------------------ #
+    # Core hourly measurement history                                     #
+    # ------------------------------------------------------------------ #
     """
     CREATE TABLE IF NOT EXISTS consumption_history (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts             TEXT    NOT NULL UNIQUE,   -- ISO-8601 UTC, hour-truncated
+        ts             TEXT    NOT NULL UNIQUE,   -- ISO-8601 local with tz offset, hour-truncated
         hour           INTEGER NOT NULL,           -- 0-23 local
         day_of_week    INTEGER NOT NULL,           -- 0=Mon…6=Sun local
         month          INTEGER NOT NULL,           -- 1-12 local
@@ -30,6 +33,20 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_ts  ON consumption_history(ts)",
     "CREATE INDEX IF NOT EXISTS idx_dow ON consumption_history(day_of_week, hour)",
+
+    # ------------------------------------------------------------------ #
+    # Daily actuals snapshot (written once per day, around midnight)      #
+    # Future: forecast_snapshots table will be added here for Plan 2     #
+    # ------------------------------------------------------------------ #
+    """
+    CREATE TABLE IF NOT EXISTS daily_snapshots (
+        date           TEXT    PRIMARY KEY,        -- YYYY-MM-DD local
+        actual_kwh     REAL    NOT NULL,            -- Day total kWh
+        hourly_wh_json TEXT    NOT NULL,            -- JSON [wh_0..wh_23], null for missing hours
+        hours_count    INTEGER NOT NULL,            -- Available hours out of 24
+        recorded_at    TEXT    NOT NULL             -- ISO-8601 UTC when written
+    )
+    """,
 ]
 
 # Migrations: add columns that didn't exist in v1.0
@@ -208,3 +225,71 @@ class HCMLDatabase:
                 buckets.setdefault(key, []).append(float(presence.get(pid, 0)))
 
         return {k: sum(v) / len(v) for k, v in buckets.items()}
+
+    # ------------------------------------------------------------------
+    # Daily snapshots  (actual consumption, written once per day)
+    # ------------------------------------------------------------------
+
+    def get_rows_for_local_date(self, local_date: str) -> list[dict]:
+        """
+        Return all consumption_history rows whose ts falls on `local_date`.
+
+        The ts column stores ISO-8601 timestamps with the local timezone offset
+        (e.g. "2026-05-26T14:00:00+02:00"), so a simple LIKE prefix filter on
+        the date part is correct and fast via the idx_ts index.
+
+        Args:
+            local_date: "YYYY-MM-DD"
+        """
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT hour, consumption_wh FROM consumption_history "
+                "WHERE ts LIKE ? ORDER BY hour",
+                (local_date + "T%",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def has_daily_snapshot(self, date: str) -> bool:
+        """Return True if a snapshot for `date` (YYYY-MM-DD) already exists."""
+        with sqlite3.connect(self._path) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM daily_snapshots WHERE date = ?", (date,)
+            ).fetchone()
+        return row is not None
+
+    def save_daily_snapshot(
+        self,
+        date: str,
+        actual_kwh: float,
+        hourly_wh: list,
+        hours_count: int,
+        recorded_at: str,
+    ) -> None:
+        """
+        Persist a daily actual snapshot.  INSERT OR IGNORE — the first write
+        for a given date wins; subsequent calls are silently skipped.
+        """
+        with sqlite3.connect(self._path) as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO daily_snapshots
+                    (date, actual_kwh, hourly_wh_json, hours_count, recorded_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (date, actual_kwh, json.dumps(hourly_wh), hours_count, recorded_at),
+            )
+            conn.commit()
+
+    def get_latest_daily_snapshot(self) -> dict | None:
+        """Return the most recent daily snapshot as a dict, or None."""
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM daily_snapshots ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["hourly_wh"] = json.loads(d.pop("hourly_wh_json") or "[]")
+        return d

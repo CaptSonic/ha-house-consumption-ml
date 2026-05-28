@@ -25,6 +25,7 @@ from .const import (
     MIN_SAMPLES,
     OUTLIER_STD,
     RIDGE_ALPHA,
+    SNAPSHOT_MIN_HOURS,
     UPDATE_INTERVAL_MINUTES,
 )
 from .db import HCMLDatabase
@@ -154,6 +155,7 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         assert self._db is not None
         await self._collect_datapoint()
+        await self._maybe_save_snapshot()
         await self.hass.async_add_executor_job(self._train_model)
         return await self._build_forecast()
 
@@ -386,6 +388,56 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     # ------------------------------------------------------------------
+    # Daily snapshot  (actual consumption, written once per day)
+    # ------------------------------------------------------------------
+
+    async def _maybe_save_snapshot(self) -> None:
+        """
+        Write a daily actual-consumption snapshot for *yesterday* if one does
+        not yet exist.  Checked on every hourly update so it survives HA
+        restarts, outages, and the case where the integration was first
+        installed after midnight.
+        """
+        assert self._db is not None
+        now       = dt_util.now()
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        exists = await self.hass.async_add_executor_job(
+            self._db.has_daily_snapshot, yesterday
+        )
+        if exists:
+            return
+
+        rows = await self.hass.async_add_executor_job(
+            self._db.get_rows_for_local_date, yesterday
+        )
+        if len(rows) < SNAPSHOT_MIN_HOURS:
+            _LOGGER.debug(
+                "Snapshot for %s skipped: only %d/%d hours available",
+                yesterday, len(rows), SNAPSHOT_MIN_HOURS,
+            )
+            return
+
+        by_hour  = {r["hour"]: r["consumption_wh"] for r in rows}
+        hourly_wh = [by_hour.get(h) for h in range(24)]
+        actual_kwh = round(
+            sum(v for v in hourly_wh if v is not None) / 1000.0, 3
+        )
+
+        await self.hass.async_add_executor_job(
+            self._db.save_daily_snapshot,
+            yesterday,
+            actual_kwh,
+            hourly_wh,
+            len(rows),
+            dt_util.utcnow().isoformat(),
+        )
+        _LOGGER.info(
+            "Snapshot saved for %s: %.2f kWh (%d/24h)",
+            yesterday, actual_kwh, len(rows),
+        )
+
+    # ------------------------------------------------------------------
     # Forecast
     # ------------------------------------------------------------------
 
@@ -474,6 +526,10 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "hourly_device_kwh": hourly_device_kwh,
             })
 
+        snapshot = await self.hass.async_add_executor_job(
+            self._db.get_latest_daily_snapshot
+        )
+
         d = self._discovery
         return {
             "days":      days,
@@ -494,6 +550,7 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "weather_entity":     d.weather_entity if d else None,
                 "workday_sensor":     d.workday_sensor if d else None,
             },
+            "snapshot":   snapshot,
             "updated_at": dt_util.now().isoformat(),
         }
 

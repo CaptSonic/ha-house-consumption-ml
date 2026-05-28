@@ -33,6 +33,7 @@ async def async_setup_platform(
         HCMLWeeklyForecastSensor(coordinator),
         HCMLModelStatusSensor(coordinator),
         HCMLDiscoverySensor(coordinator),
+        HCMLSnapshotSensor(coordinator),
     ]
     for i in range(FORECAST_DAYS):
         entities.append(HCMLDayForecastSensor(coordinator, i))
@@ -182,6 +183,38 @@ class HCMLDiscoverySensor(_Base):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return self._data.get("discovery", {})
+
+
+# ---------------------------------------------------------------------------
+# Daily actual snapshot (diagnostic)
+# ---------------------------------------------------------------------------
+
+class HCMLSnapshotSensor(_Base):
+    """Yesterday's actual consumption — written once per day around midnight."""
+
+    _attr_name                       = "HCML Ist-Verbrauch Gestern"
+    _attr_unique_id                  = "hcml_ist_gestern"
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_state_class                = SensorStateClass.MEASUREMENT
+    _attr_icon                       = "mdi:check-circle-outline"
+    _attr_entity_category            = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> float | None:
+        s = self._data.get("snapshot")
+        return s["actual_kwh"] if s else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        s = self._data.get("snapshot")
+        if not s:
+            return {}
+        return {
+            "date":        s["date"],
+            "hours_count": s["hours_count"],
+            "hourly_wh":   s["hourly_wh"],
+            "recorded_at": s["recorded_at"],
+        }
 
 
 # ---------------------------------------------------------------------------
