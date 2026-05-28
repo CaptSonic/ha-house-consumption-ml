@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
@@ -18,6 +19,11 @@ _LOGGER = logging.getLogger(__name__)
 _OFFSET_LABELS = [
     "Heute", "Morgen", "Übermorgen",
     *[f"Tag +{i}" for i in range(3, FORECAST_DAYS)],
+]
+
+_DE_WEEKDAYS = [
+    "Montag", "Dienstag", "Mittwoch", "Donnerstag",
+    "Freitag", "Samstag", "Sonntag",
 ]
 
 
@@ -73,7 +79,23 @@ class HCMLDayForecastSensor(_Base):
     def __init__(self, coordinator: HCMLCoordinator, day_idx: int) -> None:
         super().__init__(coordinator, f"day_{day_idx}")
         self._day_idx = day_idx
-        self._attr_name = f"HCML Prognose {_OFFSET_LABELS[day_idx]}"
+        # Days 0–2 keep static names; days 3–6 resolve the name dynamically
+        # via the `name` property so the actual weekday is shown.
+        if day_idx < 3:
+            self._attr_name = f"HCML Prognose {_OFFSET_LABELS[day_idx]}"
+
+    @property
+    def name(self) -> str:
+        if self._day_idx < 3:
+            return self._attr_name  # type: ignore[return-value]
+        d = self._day
+        if d:
+            try:
+                wday = datetime.strptime(d["date"], "%Y-%m-%d").weekday()
+                return f"HCML Prognose {_DE_WEEKDAYS[wday]}"
+            except Exception:
+                pass
+        return f"HCML Prognose Tag +{self._day_idx}"
 
     @property
     def _day(self) -> dict | None:
@@ -93,9 +115,14 @@ class HCMLDayForecastSensor(_Base):
         hourly        = d.get("hourly_kwh", [])
         hourly_base   = d.get("hourly_base_kwh", [])
         hourly_device = d.get("hourly_device_kwh", [])
+        try:
+            day_name_de = _DE_WEEKDAYS[datetime.strptime(d["date"], "%Y-%m-%d").weekday()]
+        except Exception:
+            day_name_de = None
         return {
             "date":              d["date"],
             "day_name":          d["day_name"],
+            "day_name_de":       day_name_de,
             "base_kwh":          d.get("base_kwh"),
             "device_kwh":        d.get("device_kwh"),
             "hourly_kwh":        hourly,
