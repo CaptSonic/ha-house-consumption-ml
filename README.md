@@ -10,6 +10,41 @@
 >
 > **No liability is accepted** for any damage, data loss, incorrect forecasts, or other issues arising from the use of this software. See the [MIT License](LICENSE) for the full disclaimer.
 
+---
+
+## Deutsch
+
+Eine Home Assistant Custom Integration, die den Haushalts-Stromverbrauch für die nächsten **7 Tage stundengenau** prognostiziert — mittels Ridge-Regression, vollständig lokal, ohne Cloud-Dienste oder externe Abhängigkeiten.
+
+### Wie es funktioniert
+
+Das Modell trennt den Verbrauch in zwei Komponenten:
+
+- **Grundlast** (Ridge-Regression) — Dauerverbraucher, Heizung, Warmwasser, Standby. Gelernt aus Tageszeit, Wochentag, Saison, Anwesenheit und Wetter.
+- **Gerätmuster** — Historischer Durchschnittsverbrauch jedes Geräts nach (Wochentag, Stunde). Nach einigen Wochen lassen sich Muster erkennen wie „Fernseher läuft typischerweise ab 18 Uhr an Werktagen".
+
+**Prognose = Grundlast-Vorhersage + Σ(Gerät-Durchschnittswatt)**
+
+Jeden Morgen zwischen 0:00 und 6:00 Uhr wird die Prognose für den laufenden Tag **eingefroren**. Am nächsten Morgen vergleicht die Integration automatisch Prognose vs. Ist-Verbrauch und liefert eine **Genauigkeitsangabe in %** sowie eine **Erklärung** welche Geräte die Abweichung verursacht haben — z. B. „Waschmaschine +1.2 kWh (unerwartet aktiv)".
+
+### Sensoren (Übersicht)
+
+| Sensor | Einheit | Beschreibung |
+|--------|---------|--------------|
+| `sensor.hcml_prognose_heute` | kWh | Prognose heute |
+| `sensor.hcml_prognose_morgen` | kWh | Morgen |
+| `sensor.hcml_prognose_ubermorgen` | kWh | Übermorgen |
+| `sensor.hcml_prognose_tag_3` … `_6` | kWh | Tage 3–6 |
+| `sensor.hcml_7_tage_prognose` | kWh | 7-Tage-Summe |
+| `sensor.hcml_modell_status` | % | Modell-R² (Diagnose) |
+| `sensor.hcml_ist_verbrauch_gestern` | kWh | Tatsächlicher Verbrauch gestern |
+| `sensor.hcml_prognose_genauigkeit` | % | Genauigkeit der gestrigen Prognose + Erklärung |
+| `sensor.hcml_discovery` | — | Erkannte Entitäten (Diagnose) |
+
+---
+
+## English
+
 A Home Assistant custom integration that predicts your household electricity consumption for the next 7 days, hour by hour — using Ridge regression, no cloud, no external dependencies.
 
 ## How it works
@@ -20,6 +55,8 @@ The model separates consumption into two components:
 - **Device patterns** — each tracked appliance's historical average wattage by (weekday, hour). After a few weeks you can see patterns like "TV is typically on from 18:00 on weekdays."
 
 **Forecast = base load prediction + Σ(device pattern watts)**
+
+Every morning between 00:00 and 06:00 the current forecast for the day is **frozen** once. The following morning the integration automatically compares the frozen forecast against the actual consumption and stores an **accuracy percentage** together with a **device-level explanation** of the delta (e.g. "Washing machine +1.2 kWh (unexpectedly active)").
 
 ### Features used for base load model
 
@@ -104,6 +141,8 @@ Check `sensor.hcml_discovery` attributes to see what was found.
 | `sensor.hcml_prognose_tag_3` … `_6` | kWh | Days 3–6 |
 | `sensor.hcml_7_tage_prognose` | kWh | 7-day total |
 | `sensor.hcml_modell_status` | % | Model R² (diagnostic) |
+| `sensor.hcml_ist_verbrauch_gestern` | kWh | Yesterday's actual consumption (diagnostic) |
+| `sensor.hcml_prognose_genauigkeit` | % | Yesterday's forecast accuracy + explanation (diagnostic) |
 | `sensor.hcml_discovery` | — | Discovered entities (diagnostic) |
 
 ### Day sensor attributes
@@ -126,26 +165,74 @@ night_kwh: 1.2
 day_kwh: 5.4
 ```
 
+### Accuracy sensor attributes
+
+```yaml
+# sensor.hcml_prognose_genauigkeit
+state: 87.3   # %
+
+date: "2026-05-27"
+forecast_kwh: 18.4
+actual_kwh: 21.1
+delta_kwh: 2.7
+frozen_at: "2026-05-27T00:12:34+00:00"
+explanation:
+  - label: "Waschmaschine +1.20 kWh (unerwartet aktiv)"
+    name: "Waschmaschine"
+    delta_kwh: 1.2
+    direction: "unerwartet aktiv"
+  - label: "Grundlast +1.50 kWh (höher als erwartet)"
+    name: "Grundlast"
+    delta_kwh: 1.5
+    direction: "höher als erwartet"
+```
+
 ## Dashboard example (ApexCharts)
 
 ```yaml
 type: custom:apexcharts-card
-graph_span: 7d
+graph_span: 24h
+span:
+  start: day
 header:
-  title: House Consumption Forecast
+  title: Hausverbrauch Prognose — Heute
+apex_config:
+  xaxis:
+    type: datetime
+    labels:
+      format: HH:mm
+update_interval: '3600'
 series:
-  - entity: sensor.hcml_7_tage_prognose
-    data_generator: |
-      const days = entity.attributes.days || [];
-      return days.flatMap(day =>
-        day.hourly_kwh.map((kwh, h) => {
-          const ts = new Date(day.date + 'T' + String(h).padStart(2,'0') + ':00:00');
-          return [ts.getTime(), kwh];
-        })
-      );
-    name: Forecast (kWh/h)
-    type: bar
+  - entity: sensor.hcml_prognose_heute
+    name: Gesamt
+    type: area
     color: '#FF6B35'
+    data_generator: |
+      const date = entity.attributes.date;
+      return (entity.attributes.hourly_kwh || []).map((kwh, h) => {
+        const ts = new Date(date + 'T' + String(h).padStart(2,'0') + ':00:00');
+        return [ts.getTime(), kwh];
+      });
+  - entity: sensor.hcml_prognose_heute
+    name: Grundlast
+    type: line
+    color: '#42A5F5'
+    data_generator: |
+      const date = entity.attributes.date;
+      return (entity.attributes.hourly_base_kwh || []).map((kwh, h) => {
+        const ts = new Date(date + 'T' + String(h).padStart(2,'0') + ':00:00');
+        return [ts.getTime(), kwh];
+      });
+  - entity: sensor.hcml_prognose_heute
+    name: Geräte
+    type: line
+    color: '#66BB6A'
+    data_generator: |
+      const date = entity.attributes.date;
+      return (entity.attributes.hourly_device_kwh || []).map((kwh, h) => {
+        const ts = new Date(date + 'T' + String(h).padStart(2,'0') + ':00:00');
+        return [ts.getTime(), kwh];
+      });
 ```
 
 ## Model quality
