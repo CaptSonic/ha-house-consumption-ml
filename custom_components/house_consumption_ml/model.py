@@ -5,7 +5,7 @@ Predicts BASE LOAD only (= total consumption minus known device watts).
 Device contributions are modelled separately via historical averages
 and added back in the coordinator forecast.
 
-Feature vector layout (18 elements)
+Feature vector layout (22 elements)
 ─────────────────────────────────────
 Time (cyclic):
   h_sin, h_cos          hour-of-day
@@ -20,14 +20,18 @@ Context:
 Weather:
   temperature_n         (T - 15) / 15
   cloud_n               cloud_cover / 100
+  heat_deg              max(0, 18 - T) / 10   heating demand proxy
+  cool_deg              max(0, T - 23) / 10   cooling demand proxy
 
 Interactions (base-load relevant cross-terms):
   is_workday × h_sin    workday morning/evening shape
   is_workday × h_cos
   any_home   × h_sin    presence time patterns
   any_home   × h_cos
-  temp_n     × h_sin    heating/cooling time shape
+  temp_n     × h_sin    temperature-time shape (linear)
   temp_n     × h_cos
+  heat_deg   × h_sin    heating-time shape (non-linear, asymmetric)
+  heat_deg   × h_cos
 
 Bias:
   1.0
@@ -64,8 +68,10 @@ def build_features(
     any_home = float(any(v >= 0.5 for v in presence.values())) if presence else 0.0
     n_home_n = sum(presence.values()) / max(n_persons_total, 1)
 
-    temp_n  = (temperature - 15.0) / 15.0
-    cloud_n = cloud_cover / 100.0
+    temp_n   = (temperature - 15.0) / 15.0
+    heat_deg = max(0.0, 18.0 - temperature) / 10.0   # heating demand proxy
+    cool_deg = max(0.0, temperature - 23.0) / 10.0   # cooling demand proxy
+    cloud_n  = cloud_cover / 100.0
 
     wday = float(is_workday)
 
@@ -78,13 +84,17 @@ def build_features(
         n_home_n,
         temp_n,
         cloud_n,
+        heat_deg,
+        cool_deg,
         # interactions
-        wday    * h_sin,
-        wday    * h_cos,
+        wday     * h_sin,
+        wday     * h_cos,
         any_home * h_sin,
         any_home * h_cos,
-        temp_n  * h_sin,
-        temp_n  * h_cos,
+        temp_n   * h_sin,
+        temp_n   * h_cos,
+        heat_deg * h_sin,
+        heat_deg * h_cos,
         1.0,  # bias
     ]
 
@@ -99,10 +109,27 @@ class RidgeModel:
     rmse: float = 0.0
     mae: float = 0.0
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        """
+        Fit Ridge regression, optionally with per-sample weights.
+
+        Weighted closed-form: A = Xᵀ W X + αI,  b = Xᵀ W y
+        where W = diag(sample_weight).
+        """
         n = X.shape[1]
-        A = X.T @ X + self.alpha * np.eye(n)
-        b = X.T @ y
+        if sample_weight is not None:
+            W = sample_weight                     # shape (n_samples,)
+            A = (X.T * W) @ X + self.alpha * np.eye(n)
+            b = X.T @ (W * y)
+        else:
+            A = X.T @ X + self.alpha * np.eye(n)
+            b = X.T @ y
+
         try:
             self.weights = np.linalg.solve(A, b)
         except np.linalg.LinAlgError:
@@ -110,7 +137,7 @@ class RidgeModel:
 
         self.is_fitted = True
         self.n_samples = len(y)
-        yp = self._raw(X)
+        yp  = self._raw(X)
         res = y - yp
         ss_res = float(np.sum(res ** 2))
         ss_tot = float(np.sum((y - np.mean(y)) ** 2))

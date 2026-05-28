@@ -38,3 +38,12 @@ LARGE_DEVICE_THRESHOLD_W = 1_500.0
 # Minimum number of recorded hours before a daily snapshot is considered valid
 # (guards against snapshotting days where HA was mostly offline)
 SNAPSHOT_MIN_HOURS = 12
+
+# Plausibility thresholds for incoming house power readings
+# Values outside this range are logged as warnings and not stored
+PLAUSIBILITY_MIN_W =    50.0    # Below this → likely sensor error / no real load
+PLAUSIBILITY_MAX_W = 15_000.0   # Above this → likely sensor spike
+
+# Drift detection: warn when rolling accuracy falls below this threshold
+DRIFT_WARNING_THRESHOLD_PCT = 70.0   # %
+DRIFT_MIN_DAYS              =  3     # Minimum accuracy data points before flagging

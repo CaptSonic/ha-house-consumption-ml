@@ -467,6 +467,35 @@ class HCMLDatabase:
             )
             conn.commit()
 
+    def get_last_n_readings(self, n: int = 6) -> list[float]:
+        """Return the last n consumption_wh values from history, newest first.
+        Used for plausibility (spike) checks before inserting new data.
+        """
+        with sqlite3.connect(self._path) as conn:
+            rows = conn.execute(
+                "SELECT consumption_wh FROM consumption_history "
+                "ORDER BY ts DESC LIMIT ?",
+                (n,),
+            ).fetchall()
+        return [float(r[0]) for r in rows]
+
+    def get_recent_forecast_accuracies(self, n: int = 14) -> list[dict]:
+        """Return the last n days of forecast accuracy data (newest first).
+        Used for drift detection.
+        """
+        with sqlite3.connect(self._path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT date, accuracy_pct, delta_kwh
+                FROM forecast_snapshots
+                WHERE accuracy_pct IS NOT NULL
+                ORDER BY date DESC LIMIT ?
+                """,
+                (n,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_latest_nightly_forecast(self) -> dict | None:
         """Return the most recently stored nightly forecast, or None."""
         with sqlite3.connect(self._path) as conn:

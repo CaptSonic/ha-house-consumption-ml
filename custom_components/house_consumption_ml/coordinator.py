@@ -20,10 +20,14 @@ from .const import (
     BOOTSTRAP_DAYS,
     DEVICE_ON_THRESHOLD_W,
     DOMAIN,
+    DRIFT_MIN_DAYS,
+    DRIFT_WARNING_THRESHOLD_PCT,
     FORECAST_DAYS,
     LARGE_DEVICE_THRESHOLD_W,
     MIN_SAMPLES,
     OUTLIER_STD,
+    PLAUSIBILITY_MAX_W,
+    PLAUSIBILITY_MIN_W,
     RIDGE_ALPHA,
     SNAPSHOT_MIN_HOURS,
     UPDATE_INTERVAL_MINUTES,
@@ -182,18 +186,24 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Accuracy tracking (uses days[0] for forecast_snapshots)
         await self._maybe_freeze_and_evaluate(days)
 
+        drift_detected, avg_acc_7d = await self.hass.async_add_executor_job(
+            self._check_drift
+        )
+
         d = self._discovery
         return {
             "days":       days,
             "total_kwh":  total_kwh,
             "nightly_at": nightly_at,
             "model": {
-                "fitted":    self._model.is_fitted,
-                "samples":   self._model.n_samples,
-                "r2_pct":    round(self._model.r2 * 100.0, 1),
-                "rmse_wh":   round(self._model.rmse, 1),
-                "mae_wh":    round(self._model.mae, 1),
-                "db_rows":   self._db.count(),
+                "fitted":          self._model.is_fitted,
+                "samples":         self._model.n_samples,
+                "r2_pct":          round(self._model.r2 * 100.0, 1),
+                "rmse_wh":         round(self._model.rmse, 1),
+                "mae_wh":          round(self._model.mae, 1),
+                "db_rows":         self._db.count(),
+                "drift_detected":  drift_detected,
+                "avg_accuracy_7d": avg_acc_7d,
             },
             "discovery": {
                 "house_power_sensor": d.house_power_sensor if d else None,
@@ -351,6 +361,28 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             return
 
+        # ── Plausibility checks ──────────────────────────────────────────
+        if not (PLAUSIBILITY_MIN_W <= power_w <= PLAUSIBILITY_MAX_W):
+            _LOGGER.warning(
+                "House power %.0f W outside plausible range [%g–%g W] — skipping",
+                power_w, PLAUSIBILITY_MIN_W, PLAUSIBILITY_MAX_W,
+            )
+            return
+
+        recent = self._db.get_last_n_readings(6)
+        if len(recent) >= 3:
+            arr = np.array(recent, dtype=float)
+            std = float(np.std(arr))
+            if std > 50.0:
+                med = float(np.median(arr))
+                if abs(power_w - med) > OUTLIER_STD * 2.0 * std:
+                    _LOGGER.warning(
+                        "House power %.0f W looks like a spike "
+                        "(median=%.0f W, σ=%.0f W) — skipping",
+                        power_w, med, std,
+                    )
+                    return
+
         presence  = self._read_presence()
         devices   = self._read_appliance_states()
         is_wday   = self._read_workday()
@@ -418,16 +450,36 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             X_lst.append(feats)
             y_lst.append(base_wh)
 
-        X = np.array(X_lst, dtype=float)
-        y = np.array(y_lst, dtype=float)
+        # Sample weights: exponential decay with 30-day half-life
+        # so that recent data influences the model more than old bootstrap data
+        weights_lst = []
+        now_ts = datetime.utcnow()
+        for r in rows:
+            try:
+                row_dt = datetime.fromisoformat(r["ts"].replace("Z", "+00:00"))
+                age_d  = max(
+                    0.0,
+                    (now_ts - row_dt.replace(tzinfo=None)).total_seconds() / 86400.0,
+                )
+            except Exception:
+                age_d = 45.0  # fallback: middle of 90-day window
+            weights_lst.append(float(np.exp(-age_d / 30.0)))
 
-        # Remove outliers
+        X = np.array(X_lst,       dtype=float)
+        y = np.array(y_lst,       dtype=float)
+        W = np.array(weights_lst, dtype=float)
+
+        # Remove outliers (apply same mask to weights)
         mean_y, std_y = np.mean(y), np.std(y)
         if std_y > 0:
             mask = np.abs(y - mean_y) <= OUTLIER_STD * std_y
-            X, y = X[mask], y[mask]
+            X, y, W = X[mask], y[mask], W[mask]
 
-        self._model.fit(X, y)
+        # Normalise weights so Ridge alpha scale stays consistent
+        if W.mean() > 0:
+            W /= W.mean()
+
+        self._model.fit(X, y, sample_weight=W)
         self._hourly_means      = self._db.get_hourly_means()
         self._presence_patterns = self._db.get_presence_patterns(self._person_ids)
         self._device_patterns   = self._db.get_device_patterns()
@@ -678,6 +730,30 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             })
 
         return accuracy, delta_kwh, explanation
+
+    # ------------------------------------------------------------------
+    # Drift detection
+    # ------------------------------------------------------------------
+
+    def _check_drift(self) -> tuple[bool, float | None]:
+        """
+        Compare the rolling 7-day average forecast accuracy against the
+        warning threshold.  Returns (drift_detected, avg_accuracy_pct_or_None).
+        Runs in executor (SQLite I/O).
+        """
+        assert self._db is not None
+        recent = self._db.get_recent_forecast_accuracies(7)
+        if len(recent) < DRIFT_MIN_DAYS:
+            return False, None
+        avg   = sum(r["accuracy_pct"] for r in recent) / len(recent)
+        drift = avg < DRIFT_WARNING_THRESHOLD_PCT
+        if drift:
+            _LOGGER.warning(
+                "HCML drift detected: avg forecast accuracy = %.1f%% over %d days "
+                "(threshold %.1f%%) — check sensors or consider model reset",
+                avg, len(recent), DRIFT_WARNING_THRESHOLD_PCT,
+            )
+        return drift, round(avg, 1)
 
     # ------------------------------------------------------------------
     # Nightly forecast refresh  (Plan 3)
