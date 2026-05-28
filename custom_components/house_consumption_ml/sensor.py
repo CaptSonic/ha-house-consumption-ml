@@ -115,6 +115,7 @@ class HCMLDayForecastSensor(_Base):
         hourly        = d.get("hourly_kwh", [])
         hourly_base   = d.get("hourly_base_kwh", [])
         hourly_device = d.get("hourly_device_kwh", [])
+        hourly_actual = d.get("hourly_actual_kwh") or []  # actual measured kWh per hour (today only)
         try:
             day_name_de = _DE_WEEKDAYS[datetime.strptime(d["date"], "%Y-%m-%d").weekday()]
         except Exception:
@@ -136,6 +137,7 @@ class HCMLDayForecastSensor(_Base):
                 }
                 for h in range(24)
             },
+            "hourly_actual_kwh": hourly_actual,
             "peak_hour": _peak_hour(hourly),
             "night_kwh": round(sum(hourly[:6] + hourly[22:]), 3),
             "day_kwh":   round(sum(hourly[6:22]), 3),
@@ -274,7 +276,8 @@ class HCMLForecastAccuracySensor(_Base):
         a = self._data.get("accuracy")
         if not a:
             return {}
-        forecast_kwh = round(sum(v or 0 for v in a["hourly_wh"]) / 1000.0, 2)
+        hourly_wh    = a.get("hourly_wh") or []
+        forecast_kwh = round(sum(v or 0 for v in hourly_wh) / 1000.0, 2)
         return {
             "date":         a["date"],
             "forecast_kwh": forecast_kwh,
@@ -282,6 +285,7 @@ class HCMLForecastAccuracySensor(_Base):
             "delta_kwh":    a["delta_kwh"],
             "explanation":  a.get("explanation") or [],
             "frozen_at":    a["frozen_at"],
+            "hourly_wh":    hourly_wh,   # frozen forecast Wh per hour (for comparison charts)
         }
 
 

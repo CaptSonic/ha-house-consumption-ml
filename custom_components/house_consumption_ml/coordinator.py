@@ -189,6 +189,18 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             total_kwh  = live["total_kwh"]
             nightly_at = None
 
+        # Enrich today's forecast (days[0]) with actual consumption measured so far
+        if days:
+            today_str  = dt_util.now().strftime("%Y-%m-%d")
+            today_rows = await self.hass.async_add_executor_job(
+                self._db.get_rows_for_local_date, today_str
+            )
+            by_hour = {
+                r["hour"]: round(r["consumption_wh"] / 1000.0, 3)
+                for r in today_rows
+            }
+            days[0]["hourly_actual_kwh"] = [by_hour.get(h) for h in range(24)]
+
         # Accuracy tracking (uses days[0] for forecast_snapshots)
         await self._maybe_freeze_and_evaluate(days)
 
