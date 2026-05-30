@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "House Consumption ML einrichten",
+        "description": "Alle Felder sind optional — die Integration erkennt Sensoren automatisch. Du kannst alles später unter *Konfigurieren* anpassen.",
+        "data": {
+          "house_power_sensor": "Haus-Leistungssensor",
+          "calendars": "Kalender (Feiertage / Urlaub)",
+          "exclude_devices": "Geräte ausschließen",
+          "db_path": "Datenbankpfad",
+          "sfml_db_path": "SFML-Datenbankpfad (optional)"
+        },
+        "data_description": {
+          "house_power_sensor": "Überschreibt die Auto-Erkennung. Muss den gesamten Hausverbrauch in Watt liefern (≥ 0).",
+          "calendars": "Tage mit Kalendereinträgen werden als Nicht-Werktage gewertet. Nur Urlaubs- und Feiertagskalender hinzufügen.",
+          "exclude_devices": "Ein Gerätename pro Zeile (Groß-/Kleinschreibung egal). Solarwechselrichter, Batterien etc. ausschließen.",
+          "db_path": "Pfad zur SQLite-Datenbank für gespeicherte Messwerte.",
+          "sfml_db_path": "Pfad zur SFML-Datenbank (nur lesend, falls vorhanden)."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Nur eine Instanz von House Consumption ML ist möglich."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Einstellungen anpassen",
+        "data": {
+          "house_power_sensor": "Haus-Leistungssensor",
+          "calendars": "Kalender (Feiertage / Urlaub)",
+          "exclude_devices": "Geräte ausschließen",
+          "db_path": "Datenbankpfad",
+          "sfml_db_path": "SFML-Datenbankpfad (optional)"
+        },
+        "data_description": {
+          "house_power_sensor": "Leer lassen für Auto-Erkennung.",
+          "calendars": "Nur Urlaubs- und Feiertagskalender — keine Müllkalender o. ä.",
+          "exclude_devices": "Ein Name-Fragment pro Zeile. Solarwechselrichter, Batterien etc.",
+          "db_path": "Pfad zur SQLite-Datenbank.",
+          "sfml_db_path": "Pfad zur SFML-Datenbank (nur lesend, leer = deaktiviert)."
+        }
+      }
+    }
+  }
+}

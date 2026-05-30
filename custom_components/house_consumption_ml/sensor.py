@@ -6,10 +6,12 @@ from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, FORECAST_DAYS
@@ -28,13 +30,12 @@ _DE_WEEKDAYS = [
 ]
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config: dict,
-    async_add_entities,
-    discovery_info=None,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: HCMLCoordinator = hass.data[DOMAIN]
+    coordinator: HCMLCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities: list[SensorEntity] = [
         HCMLWeeklyForecastSensor(coordinator),
