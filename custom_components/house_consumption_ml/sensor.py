@@ -8,7 +8,8 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
+from homeassistant.helpers.device_registry import DeviceEntryType
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, FORECAST_DAYS
@@ -54,6 +55,13 @@ async def async_setup_platform(
 
 class _Base(CoordinatorEntity[HCMLCoordinator], SensorEntity):
     _attr_has_entity_name = True
+    _attr_device_info = DeviceInfo(
+        identifiers={(DOMAIN, "hcml_forecast")},
+        name="House Consumption ML",
+        manufacturer="CaptSonic",
+        model="Ridge Regression Forecast",
+        entry_type=DeviceEntryType.SERVICE,
+    )
 
     def __init__(self, coordinator: HCMLCoordinator, uid_suffix: str | None = None) -> None:
         super().__init__(coordinator)
@@ -82,7 +90,7 @@ class HCMLDayForecastSensor(_Base):
         # Days 0–2 keep static names; days 3–6 resolve the name dynamically
         # via the `name` property so the actual weekday is shown.
         if day_idx < 3:
-            self._attr_name = f"HCML Prognose {_OFFSET_LABELS[day_idx]}"
+            self._attr_name = f"Prognose {_OFFSET_LABELS[day_idx]}"
 
     @property
     def name(self) -> str:
@@ -92,10 +100,10 @@ class HCMLDayForecastSensor(_Base):
         if d:
             try:
                 wday = datetime.strptime(d["date"], "%Y-%m-%d").weekday()
-                return f"HCML Prognose {_DE_WEEKDAYS[wday]}"
+                return f"Prognose {_DE_WEEKDAYS[wday]}"
             except Exception:
                 pass
-        return f"HCML Prognose Tag +{self._day_idx}"
+        return f"Prognose Tag +{self._day_idx}"
 
     @property
     def _day(self) -> dict | None:
@@ -149,7 +157,7 @@ class HCMLDayForecastSensor(_Base):
 # ---------------------------------------------------------------------------
 
 class HCMLWeeklyForecastSensor(_Base):
-    _attr_name                        = "HCML 7-Tage Prognose"
+    _attr_name                        = "7-Tage Prognose"
     _attr_unique_id                   = "hcml_weekly"
     _attr_native_unit_of_measurement  = UnitOfEnergy.KILO_WATT_HOUR
     _attr_state_class                 = SensorStateClass.MEASUREMENT
@@ -173,7 +181,7 @@ class HCMLWeeklyForecastSensor(_Base):
 # ---------------------------------------------------------------------------
 
 class HCMLModelStatusSensor(_Base):
-    _attr_name            = "HCML Modell Status"
+    _attr_name            = "Modell Status"
     _attr_unique_id       = "hcml_model_status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon            = "mdi:brain"
@@ -200,7 +208,7 @@ class HCMLModelStatusSensor(_Base):
 
 class HCMLDiscoverySensor(_Base):
     """Shows which entities were auto-discovered — useful for debugging."""
-    _attr_name            = "HCML Discovery"
+    _attr_name            = "Discovery"
     _attr_unique_id       = "hcml_discovery"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon            = "mdi:magnify-scan"
@@ -224,7 +232,7 @@ class HCMLDiscoverySensor(_Base):
 class HCMLSnapshotSensor(_Base):
     """Yesterday's actual consumption — written once per day around midnight."""
 
-    _attr_name                       = "HCML Ist-Verbrauch Gestern"
+    _attr_name                       = "Ist-Verbrauch Gestern"
     _attr_unique_id                  = "hcml_ist_gestern"
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_state_class                = SensorStateClass.MEASUREMENT
@@ -259,7 +267,7 @@ class HCMLForecastAccuracySensor(_Base):
     actual consumption, plus a device-level explanation of the delta.
     """
 
-    _attr_name                       = "HCML Prognose-Genauigkeit"
+    _attr_name                       = "Prognose-Genauigkeit"
     _attr_unique_id                  = "hcml_prognose_genauigkeit"
     _attr_native_unit_of_measurement = "%"
     _attr_state_class                = SensorStateClass.MEASUREMENT
