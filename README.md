@@ -31,12 +31,14 @@ Jeden Morgen zwischen 0:00 und 6:00 Uhr wird die Prognose für den laufenden Tag
 
 ### Sensoren (Übersicht)
 
-| Sensor | Einheit | Beschreibung |
+Alle Sensoren erscheinen unter dem Gerät **„House Consumption ML"** in Einstellungen → Geräte & Dienste.
+
+| Sensor (Entity-ID) | Einheit | Beschreibung |
 |--------|---------|--------------|
 | `sensor.hcml_prognose_heute` | kWh | Prognose heute |
 | `sensor.hcml_prognose_morgen` | kWh | Morgen |
 | `sensor.hcml_prognose_ubermorgen` | kWh | Übermorgen |
-| `sensor.hcml_prognose_tag_3` … `_6` | kWh | Tage 3–6 |
+| `sensor.hcml_prognose_tag_3` … `_6` | kWh | Tage 3–6 (Wochentag dynamisch) |
 | `sensor.hcml_7_tage_prognose` | kWh | 7-Tage-Summe |
 | `sensor.hcml_modell_status` | % | Modell-R² (Diagnose) |
 | `sensor.hcml_ist_verbrauch_gestern` | kWh | Tatsächlicher Verbrauch gestern |
@@ -92,53 +94,62 @@ Training uses **exponential decay sample weights** (30-day half-life) so recent 
 2. Add this repository URL, category: **Integration**
 3. Install **House Consumption ML Forecast**
 4. Restart Home Assistant
+5. Go to **Settings → Devices & Services → Add Integration** and search for *House Consumption ML*
+6. Follow the setup wizard — all fields are optional, auto-discovery handles the rest
 
 ### Manual
 
-Copy `custom_components/house_consumption_ml/` to your HA config directory and restart.
+1. Copy `custom_components/house_consumption_ml/` to your HA config directory
+2. Restart Home Assistant
+3. Go to **Settings → Devices & Services → Add Integration** → *House Consumption ML*
 
 ## Configuration
 
-Add to `configuration.yaml` (everything is optional — the integration auto-discovers all entities):
+All settings are configured through the Home Assistant UI. After setup, click **Configure** on the integration card to open the options form:
+
+| Option | Description |
+|--------|-------------|
+| **House power sensor** | Override auto-discovery. Must report total consumption in Watts (W, always ≥ 0). Leave empty for auto-discovery. |
+| **Calendars** | Holiday/vacation `calendar.*` entities. Days with events are treated as non-workdays. **Do not add garbage-collection calendars.** |
+| **Exclude devices** | One name fragment per line. Sensors whose entity_id or friendly name contains any fragment are excluded (solar inverters, batteries, …). |
+| **DB path** | Path to the SQLite database (default: `/config/house_consumption_ml.db`). |
+| **SFML DB path** | Optional read-only path to an SFML solar_forecast.db for bootstrap data. |
+
+Changes take effect immediately — **no HA restart required**.
+
+### Legacy YAML configuration
+
+> **Deprecated:** YAML configuration is still supported for backward compatibility but is no longer required. If you have an existing YAML block, it is automatically imported into a config entry on first start. You can then safely remove it from `configuration.yaml`.
+
+<details>
+<summary>Show YAML example</summary>
 
 ```yaml
 house_consumption_ml:
-  # Override the house power sensor (recommended if auto-discovery picks the wrong one)
   house_power_sensor: sensor.sfml_house_power
-
-  # Exclude devices by name fragment (entity_id or friendly name, case-insensitive)
   exclude_devices:
     - hyper_2000      # solar inverter
     - ab2000          # BKW battery
-    - my_inverter
-
-  # Calendars for holidays and vacation days (optional)
-  # Days with any event in these calendars are treated as non-workdays.
-  # Tip: check sensor.hcml_discovery → calendars_available to see all available calendar IDs.
   calendars:
     - calendar.urlaub
     - calendar.feiertage_deutschland
-
-  # Paths to SQLite databases (defaults shown)
   db_path: /config/house_consumption_ml.db
-  sfml_db_path: /config/solar_forecast.db   # read-only if present
+  sfml_db_path: /config/solar_forecast.db
 ```
+
+</details>
 
 ### `house_power_sensor`
 
 The sensor must return **actual house consumption in Watts (W), always ≥ 0**. Do not use a net-grid sensor (which goes negative during solar export). A template sensor that calculates `grid_import + solar_self_consumption` is ideal.
 
-### `exclude_devices`
-
-Any sensor whose `entity_id` or friendly name contains one of these strings (case-insensitive) is excluded from the appliance list. Use this for solar inverters, batteries, or any device that is not a consumer load.
-
 ### `calendars`
 
-A list of `calendar.*` entity IDs. Any day that has at least one event in any of the listed calendars is treated as a non-workday — the model uses the weekend/holiday consumption profile instead of the weekday profile. This applies both to training data collection and to the 7-day forecast.
+A list of `calendar.*` entity IDs. Any day that has at least one event in any of the listed calendars is treated as a non-workday — the model uses the weekend/holiday consumption profile instead of the weekday profile.
 
-**Important:** only add calendars that contain holidays or vacation. A garbage-collection calendar with entries on regular workdays would incorrectly suppress the workday profile on those days — just leave it out.
+**Important:** only add calendars that contain holidays or vacation. A garbage-collection calendar with entries on regular workdays would incorrectly suppress the workday profile on those days.
 
-To find the right entity IDs, check the `calendars_available` attribute of `sensor.hcml_discovery` after a restart. It lists every calendar HA currently knows about.
+To find the right entity IDs, check the `calendars_available` attribute of `sensor.hcml_discovery`. It lists every calendar HA currently knows about.
 
 ## Auto-discovery
 
@@ -153,16 +164,18 @@ On first start the integration scans all HA entities and classifies them automat
 | **Workday** | `binary_sensor.*workday*` / `*werktag*` |
 | **Calendars** | All `calendar.*` entities — listed in discovery for reference |
 
-Check `sensor.hcml_discovery` attributes to see what was found. The `calendars_available` attribute shows every calendar HA knows about; copy the IDs you want into the `calendars:` config option.
+Check `sensor.hcml_discovery` attributes to see what was found.
 
 ## Sensors created
+
+All sensors are grouped under a single **"House Consumption ML"** device in Settings → Devices & Services → Devices. Entity IDs remain stable regardless of display name changes.
 
 | Sensor | Unit | Description |
 |--------|------|-------------|
 | `sensor.hcml_prognose_heute` | kWh | Today's forecast |
 | `sensor.hcml_prognose_morgen` | kWh | Tomorrow |
 | `sensor.hcml_prognose_ubermorgen` | kWh | Day after tomorrow |
-| `sensor.hcml_prognose_tag_3` … `_6` | kWh | Days 3–6 |
+| `sensor.hcml_prognose_tag_3` … `_6` | kWh | Days 3–6 (German weekday name, dynamic) |
 | `sensor.hcml_7_tage_prognose` | kWh | 7-day total |
 | `sensor.hcml_modell_status` | % | Model R² (diagnostic) |
 | `sensor.hcml_ist_verbrauch_gestern` | kWh | Yesterday's actual consumption (diagnostic) |
@@ -174,11 +187,13 @@ Check `sensor.hcml_discovery` attributes to see what was found. The `calendars_a
 ```yaml
 date: "2026-05-27"
 day_name: "Wednesday"
+day_name_de: "Mittwoch"
 base_kwh: 3.2          # base load contribution
 device_kwh: 1.8        # device pattern contribution
-hourly_kwh: [0.18, 0.17, ...]          # 24 total values
+hourly_kwh: [0.18, 0.17, ...]          # 24 total forecast values (kWh)
 hourly_base_kwh: [0.10, 0.09, ...]     # 24 base load values
-hourly_device_kwh: [0.08, 0.08, ...]   # 24 device values
+hourly_device_kwh: [0.08, 0.08, ...]   # 24 device pattern values
+hourly_actual_kwh: [0.21, 0.19, ...]   # today only: measured kWh per hour (null for future hours)
 hourly_detail:
   "18:00":
     total: 0.32
@@ -188,6 +203,8 @@ peak_hour: "19:00"
 night_kwh: 1.2
 day_kwh: 5.4
 ```
+
+> `hourly_actual_kwh` is only populated for `sensor.hcml_prognose_heute` (today). It allows overlaying actual vs. forecast on the same chart.
 
 ### Accuracy sensor attributes
 
@@ -200,6 +217,7 @@ forecast_kwh: 18.4
 actual_kwh: 21.1
 delta_kwh: 2.7
 frozen_at: "2026-05-27T00:12:34+00:00"
+hourly_wh: [310, 290, ...]   # frozen forecast Wh per hour (for yesterday comparison chart)
 explanation:
   - label: "Waschmaschine +1.20 kWh (unerwartet aktiv)"
     name: "Waschmaschine"
@@ -211,7 +229,19 @@ explanation:
     direction: "höher als erwartet"
 ```
 
+### Snapshot sensor attributes
+
+```yaml
+# sensor.hcml_ist_verbrauch_gestern
+date: "2026-05-27"
+hours_count: 24
+hourly_wh: [272, 288, ...]   # actual measured Wh per hour
+recorded_at: "2026-05-28T00:31:00+00:00"
+```
+
 ## Dashboard example (ApexCharts)
+
+### Today — Forecast + Actual
 
 ```yaml
 type: custom:apexcharts-card
@@ -219,43 +249,117 @@ graph_span: 24h
 span:
   start: day
 header:
-  title: Hausverbrauch Prognose — Heute
+  show: false
+update_interval: '3600'
 apex_config:
   xaxis:
     type: datetime
     labels:
       format: HH:mm
-update_interval: '3600'
+  stroke:
+    width: [0, 2, 2, 0]
 series:
   - entity: sensor.hcml_prognose_heute
-    name: Gesamt
+    name: Prognose Gesamt
     type: area
     color: '#FF6B35'
+    opacity: 0.4
     data_generator: |
-      const date = entity.attributes.date;
-      return (entity.attributes.hourly_kwh || []).map((kwh, h) => {
-        const ts = new Date(date + 'T' + String(h).padStart(2,'0') + ':00:00');
-        return [ts.getTime(), kwh];
+      const h = entity.attributes.hourly_kwh || [];
+      const dt = entity.attributes.date;
+      if (!dt || !h.length) return [];
+      return h.map((v, i) => {
+        const d = new Date(dt + 'T00:00:00'); d.setHours(i);
+        return [d.getTime(), +(v).toFixed(3)];
       });
   - entity: sensor.hcml_prognose_heute
     name: Grundlast
     type: line
     color: '#42A5F5'
     data_generator: |
-      const date = entity.attributes.date;
-      return (entity.attributes.hourly_base_kwh || []).map((kwh, h) => {
-        const ts = new Date(date + 'T' + String(h).padStart(2,'0') + ':00:00');
-        return [ts.getTime(), kwh];
+      const h = entity.attributes.hourly_base_kwh || [];
+      const dt = entity.attributes.date;
+      if (!dt || !h.length) return [];
+      return h.map((v, i) => {
+        const d = new Date(dt + 'T00:00:00'); d.setHours(i);
+        return [d.getTime(), +(v).toFixed(3)];
       });
   - entity: sensor.hcml_prognose_heute
     name: Geräte
     type: line
     color: '#66BB6A'
     data_generator: |
-      const date = entity.attributes.date;
-      return (entity.attributes.hourly_device_kwh || []).map((kwh, h) => {
-        const ts = new Date(date + 'T' + String(h).padStart(2,'0') + ':00:00');
-        return [ts.getTime(), kwh];
+      const h = entity.attributes.hourly_device_kwh || [];
+      const dt = entity.attributes.date;
+      if (!dt || !h.length) return [];
+      return h.map((v, i) => {
+        const d = new Date(dt + 'T00:00:00'); d.setHours(i);
+        return [d.getTime(), +(v).toFixed(3)];
+      });
+  - entity: sensor.hcml_prognose_heute
+    name: Tatsächlich
+    type: column
+    color: '#26C6DA'
+    opacity: 0.8
+    data_generator: |
+      const h = entity.attributes.hourly_actual_kwh || [];
+      const dt = entity.attributes.date;
+      if (!dt) return [];
+      return h.reduce((acc, v, i) => {
+        if (v !== null && v !== undefined) {
+          const d = new Date(dt + 'T00:00:00'); d.setHours(i);
+          acc.push([d.getTime(), +(v).toFixed(3)]);
+        }
+        return acc;
+      }, []);
+```
+
+### Yesterday — Frozen Forecast vs. Actual
+
+```yaml
+type: custom:apexcharts-card
+graph_span: 24h
+span:
+  start: day
+  offset: '-1d'
+header:
+  show: false
+update_interval: '3600'
+apex_config:
+  xaxis:
+    type: datetime
+    labels:
+      format: HH:mm
+  stroke:
+    width: [0, 2]
+series:
+  - entity: sensor.hcml_ist_verbrauch_gestern
+    name: Tatsächlich
+    type: column
+    color: '#26C6DA'
+    opacity: 0.8
+    data_generator: |
+      const h = entity.attributes.hourly_wh || [];
+      const dt = entity.attributes.date;
+      if (!dt || !h.length) return [];
+      return h.reduce((acc, v, i) => {
+        if (v !== null && v !== undefined) {
+          const d = new Date(dt + 'T00:00:00'); d.setHours(i);
+          acc.push([d.getTime(), +(v / 1000).toFixed(3)]);
+        }
+        return acc;
+      }, []);
+  - entity: sensor.hcml_prognose_genauigkeit
+    name: Prognose (gefroren)
+    type: line
+    color: '#FF6B35'
+    data_generator: |
+      const h = entity.attributes.hourly_wh || [];
+      const dt = entity.attributes.date;
+      if (!dt || !h.length) return [];
+      return h.map((v, i) => {
+        const d = new Date(dt + 'T00:00:00'); d.setHours(i);
+        return [d.getTime(), +((v || 0) / 1000).toFixed(3)];
       });
 ```
 
