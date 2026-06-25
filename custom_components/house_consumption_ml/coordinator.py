@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     BOOTSTRAP_DAYS,
+    DAILY_REDISCOVERY_HOUR,
     DEVICE_ON_THRESHOLD_W,
     DISCOVERY_RETRY_DELAYS,
     DOMAIN,
@@ -84,6 +85,9 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Weather cache
         self._wx_cache: list[dict] | None = None
         self._wx_cache_at: datetime | None = None
+
+        # Daily re-discovery tracking
+        self._last_rediscovery_date: str = ""
 
     # ------------------------------------------------------------------
     # Setup
@@ -153,32 +157,19 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self.async_refresh()
 
             # ── Pass 2+: Zigbee / Z2MQTT catch-up ───────────────────────────
-            known = set(self._appliance_sensors)
             for pass_num, delay in enumerate(delays[1:], start=2):
                 _LOGGER.info(
                     "House Consumption ML: waiting %ds before discovery pass %d…",
                     delay, pass_num,
                 )
                 await asyncio.sleep(delay)
-
                 _LOGGER.info(
                     "House Consumption ML: auto-discovery pass %d (catch-up)…", pass_num
                 )
-                disc = discover_all(self.hass, self._exclude_devices)
-                new_sensors = sorted(set(disc.appliance_sensors) - known)
-
-                if new_sensors:
-                    _LOGGER.info(
-                        "Pass %d: %d new appliance(s) discovered: %s",
-                        pass_num, len(new_sensors), new_sensors,
-                    )
-                    known.update(new_sensors)
-                    disc.appliance_sensors = sorted(known)
-                    self._discovery = disc
-                    self._apply_discovery(disc)
+                prev_count = len(self._appliance_sensors)
+                await self._async_merge_discovery()
+                if len(self._appliance_sensors) > prev_count:
                     await self.async_refresh()
-                else:
-                    _LOGGER.debug("Pass %d: no new appliances found", pass_num)
 
         except Exception as exc:
             _LOGGER.error("HCML startup failed: %s", exc, exc_info=True)
@@ -217,6 +208,14 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         assert self._db is not None
+
+        # Daily re-discovery at DAILY_REDISCOVERY_HOUR to catch devices that
+        # came online after startup (Zigbee, Z-Wave, slow integrations).
+        now = dt_util.now()
+        today = now.strftime("%Y-%m-%d")
+        if now.hour == DAILY_REDISCOVERY_HOUR and self._last_rediscovery_date != today:
+            self._last_rediscovery_date = today
+            await self._async_merge_discovery()
 
         # Refresh calendar-based holiday dates for the next 8 days
         self._holiday_dates = await self._get_holiday_dates()
@@ -417,6 +416,31 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception:
                 pass
         return lookup
+
+    # ------------------------------------------------------------------
+    # Re-discovery (daily + startup catch-up)
+    # ------------------------------------------------------------------
+
+    async def _async_merge_discovery(self) -> None:
+        """
+        Run a fresh discovery pass and merge any newly online appliances into
+        the existing list.  Never removes devices that are already known —
+        only adds new ones.  Safe to call at any time.
+        """
+        _LOGGER.info("HCML: running re-discovery to pick up new/restored devices…")
+        disc = discover_all(self.hass, self._exclude_devices)
+        known = set(self._appliance_sensors)
+        new_sensors = sorted(set(disc.appliance_sensors) - known)
+        if new_sensors:
+            _LOGGER.info(
+                "Re-discovery: %d new appliance(s) added: %s",
+                len(new_sensors), new_sensors,
+            )
+            disc.appliance_sensors = sorted(known | set(disc.appliance_sensors))
+            self._discovery = disc
+            self._apply_discovery(disc)
+        else:
+            _LOGGER.debug("Re-discovery: no new appliances found")
 
     # ------------------------------------------------------------------
     # Calendar / holiday resolution

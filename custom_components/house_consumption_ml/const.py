@@ -54,4 +54,7 @@ DRIFT_MIN_DAYS              =  3     # Minimum accuracy data points before flagg
 # Remaining values: additional waits between each catch-up pass.
 # Catch-up passes add newly online devices (e.g. slow Zigbee/Z2MQTT) without
 # restarting the integration.
-DISCOVERY_RETRY_DELAYS = [30, 90]  # seconds: pass 1 at t=30, pass 2 at t=120
+DISCOVERY_RETRY_DELAYS = [30, 30, 60, 120]  # t=30s, t=60s, t=120s, t=240s after HA start
+
+# Hour at which a daily re-discovery runs to pick up devices added/restored later
+DAILY_REDISCOVERY_HOUR = 3
