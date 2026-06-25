@@ -4,6 +4,7 @@ trains model, and produces a 7-day hourly consumption forecast.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -30,6 +31,7 @@ from .const import (
     PLAUSIBILITY_MIN_W,
     RIDGE_ALPHA,
     SNAPSHOT_MIN_HOURS,
+    STARTUP_DELAY_SECONDS,
     UPDATE_INTERVAL_MINUTES,
 )
 from .db import HCMLDatabase
@@ -112,6 +114,11 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_post_start(self) -> None:
         """Run after HA is fully started: discover, bootstrap, first update."""
         try:
+            _LOGGER.info(
+                "House Consumption ML: waiting %ds for Zigbee/Z2MQTT devices to initialize…",
+                STARTUP_DELAY_SECONDS,
+            )
+            await asyncio.sleep(STARTUP_DELAY_SECONDS)
             _LOGGER.info("House Consumption ML: starting auto-discovery…")
             self._discovery = discover_all(self.hass, self._exclude_devices)
             self._apply_discovery(self._discovery)

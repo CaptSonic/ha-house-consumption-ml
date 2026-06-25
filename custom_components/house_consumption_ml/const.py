@@ -48,3 +48,7 @@ PLAUSIBILITY_MAX_W = 15_000.0   # Above this → likely sensor spike
 # Drift detection: warn when rolling accuracy falls below this threshold
 DRIFT_WARNING_THRESHOLD_PCT = 70.0   # %
 DRIFT_MIN_DAYS              =  3     # Minimum accuracy data points before flagging
+
+# Seconds to wait after EVENT_HOMEASSISTANT_STARTED before running discovery.
+# Gives Zigbee/Z2MQTT and other slow integrations time to initialize their entities.
+STARTUP_DELAY_SECONDS = 60
