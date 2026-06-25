@@ -20,6 +20,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     BOOTSTRAP_DAYS,
     DEVICE_ON_THRESHOLD_W,
+    DISCOVERY_RETRY_DELAYS,
     DOMAIN,
     DRIFT_MIN_DAYS,
     DRIFT_WARNING_THRESHOLD_PCT,
@@ -31,7 +32,6 @@ from .const import (
     PLAUSIBILITY_MIN_W,
     RIDGE_ALPHA,
     SNAPSHOT_MIN_HOURS,
-    STARTUP_DELAY_SECONDS,
     UPDATE_INTERVAL_MINUTES,
 )
 from .db import HCMLDatabase
@@ -112,14 +112,34 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
 
     async def _async_post_start(self) -> None:
-        """Run after HA is fully started: discover, bootstrap, first update."""
+        """
+        Run after HA is fully started: discover, bootstrap, first update.
+
+        Discovery runs in multiple passes according to DISCOVERY_RETRY_DELAYS so
+        that slow integrations (Zigbee2MQTT, Z-Wave, …) have time to bring their
+        entities online before we scan for appliances.
+
+        Pass 1 (after DISCOVERY_RETRY_DELAYS[0] seconds):
+            Full discovery → bootstrap if needed → first coordinator update.
+        Pass 2+ (each after the next delay value):
+            Re-scan for newly online devices and merge them into the appliance
+            list.  Only triggers a coordinator refresh when new sensors are found.
+        """
+        delays = list(DISCOVERY_RETRY_DELAYS)
+        if not delays:
+            delays = [0]
+
         try:
-            _LOGGER.info(
-                "House Consumption ML: waiting %ds for Zigbee/Z2MQTT devices to initialize…",
-                STARTUP_DELAY_SECONDS,
-            )
-            await asyncio.sleep(STARTUP_DELAY_SECONDS)
-            _LOGGER.info("House Consumption ML: starting auto-discovery…")
+            # ── Pass 1: initial discovery ────────────────────────────────────
+            initial_delay = delays[0]
+            if initial_delay > 0:
+                _LOGGER.info(
+                    "House Consumption ML: waiting %ds for devices to initialize…",
+                    initial_delay,
+                )
+                await asyncio.sleep(initial_delay)
+
+            _LOGGER.info("House Consumption ML: auto-discovery pass 1…")
             self._discovery = discover_all(self.hass, self._exclude_devices)
             self._apply_discovery(self._discovery)
 
@@ -131,6 +151,35 @@ class HCMLCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await self._bootstrap_from_recorder()
 
             await self.async_refresh()
+
+            # ── Pass 2+: Zigbee / Z2MQTT catch-up ───────────────────────────
+            known = set(self._appliance_sensors)
+            for pass_num, delay in enumerate(delays[1:], start=2):
+                _LOGGER.info(
+                    "House Consumption ML: waiting %ds before discovery pass %d…",
+                    delay, pass_num,
+                )
+                await asyncio.sleep(delay)
+
+                _LOGGER.info(
+                    "House Consumption ML: auto-discovery pass %d (catch-up)…", pass_num
+                )
+                disc = discover_all(self.hass, self._exclude_devices)
+                new_sensors = sorted(set(disc.appliance_sensors) - known)
+
+                if new_sensors:
+                    _LOGGER.info(
+                        "Pass %d: %d new appliance(s) discovered: %s",
+                        pass_num, len(new_sensors), new_sensors,
+                    )
+                    known.update(new_sensors)
+                    disc.appliance_sensors = sorted(known)
+                    self._discovery = disc
+                    self._apply_discovery(disc)
+                    await self.async_refresh()
+                else:
+                    _LOGGER.debug("Pass %d: no new appliances found", pass_num)
+
         except Exception as exc:
             _LOGGER.error("HCML startup failed: %s", exc, exc_info=True)
 

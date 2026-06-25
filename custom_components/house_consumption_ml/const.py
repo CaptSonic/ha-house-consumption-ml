@@ -49,6 +49,9 @@ PLAUSIBILITY_MAX_W = 15_000.0   # Above this → likely sensor spike
 DRIFT_WARNING_THRESHOLD_PCT = 70.0   # %
 DRIFT_MIN_DAYS              =  3     # Minimum accuracy data points before flagging
 
-# Seconds to wait after EVENT_HOMEASSISTANT_STARTED before running discovery.
-# Gives Zigbee/Z2MQTT and other slow integrations time to initialize their entities.
-STARTUP_DELAY_SECONDS = 60
+# Discovery retry schedule after EVENT_HOMEASSISTANT_STARTED.
+# First value: initial wait before pass 1 (integration starts after this).
+# Remaining values: additional waits between each catch-up pass.
+# Catch-up passes add newly online devices (e.g. slow Zigbee/Z2MQTT) without
+# restarting the integration.
+DISCOVERY_RETRY_DELAYS = [30, 90]  # seconds: pass 1 at t=30, pass 2 at t=120
